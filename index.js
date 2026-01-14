@@ -4,15 +4,16 @@ const {
   Partials,
   Events,
   ChannelType,
-  ActionRowBuilder,
   StringSelectMenuBuilder,
-  EmbedBuilder
+  ActionRowBuilder,
+  EmbedBuilder,
+  PermissionsBitField
 } = require("discord.js");
 
 // CONFIG
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const MODMAIL_CHANNEL_ID = process.env.MODMAIL_CHANNEL_ID; // Staff-only channel
-const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;         // Log channel
+const MODMAIL_CATEGORY_ID = process.env.MODMAIL_CATEGORY_ID; // Category for tickets
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;           // Log channel
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;           // Your main server ID
 
 // Create client
@@ -63,9 +64,9 @@ client.on(Events.MessageCreate, async message => {
   // Forward DM if ticket is confirmed
   if (ticket.confirmed) {
     ticket.lastActivity = Date.now(); // update last activity
-    const thread = await client.channels.fetch(ticket.threadId).catch(() => null);
-    if (!thread) return;
-    await thread.send({ content: `**${message.author.tag}:** ${message.content}` });
+    const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
+    if (!channel) return;
+    await channel.send({ content: `**${message.author.tag}:** ${message.content}` });
   }
 });
 
@@ -75,37 +76,45 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isStringSelectMenu() && interaction.customId === "ticket-category") {
       const selected = interaction.values[0];
 
-      // Create ticket immediately
-      const channel = await client.channels.fetch(MODMAIL_CHANNEL_ID);
-      const thread = await channel.threads.create({
-        name: `Ticket - ${interaction.user.username}`,
-        type: ChannelType.PrivateThread,
-        parent: MODMAIL_CHANNEL_ID
+      const guild = client.guilds.cache.get(MAIN_GUILD_ID);
+      if (!guild) return interaction.update({ content: "Could not find main server.", components: [] });
+
+      // Create ticket channel under category
+      const channel = await guild.channels.create({
+        name: `ticket-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
+        type: ChannelType.GuildText,
+        parent: MODMAIL_CATEGORY_ID,
+        permissionOverwrites: [
+          {
+            id: guild.roles.everyone,
+            deny: [PermissionsBitField.Flags.ViewChannel]
+          },
+          {
+            id: interaction.user.id,
+            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory]
+          }
+        ]
       });
 
+      // Save ticket info
       tickets.set(interaction.user.id, {
         userId: interaction.user.id,
         category: selected,
         confirmed: true,
-        threadId: thread.id,
+        channelId: channel.id,
         lastActivity: Date.now(),
         warningSent: false
       });
 
-      // Fetch guild member info
-      const mainGuild = client.guilds.cache.get(MAIN_GUILD_ID);
+      // Fetch member info for logging
       let memberData = null;
-      if (mainGuild) {
-        const member = await mainGuild.members.fetch(interaction.user.id).catch(() => null);
-        if (member) {
-          memberData = {
-            id: member.id,
-            username: member.user.tag,
-            roles: member.roles.cache
-              .filter(role => role.id !== mainGuild.id)
-              .map(r => r.name)
-          };
-        }
+      const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+      if (member) {
+        memberData = {
+          id: member.id,
+          username: member.user.tag,
+          roles: member.roles.cache.filter(r => r.id !== guild.id).map(r => r.name)
+        };
       }
 
       // Log ticket creation with @here ping
@@ -125,25 +134,25 @@ client.on(Events.InteractionCreate, async interaction => {
 
       // Confirm to user
       await interaction.update({
-        content: `Your ticket for **${selected}** has been created! Staff will assist you shortly.`,
+        content: `Your ticket for **${selected}** has been created! Staff will assist you shortly: <#${channel.id}>`,
         components: []
       });
     }
   } catch (error) {
     console.error("Interaction error:", error);
     if (interaction.replied || interaction.deferred) {
-      interaction.followUp({ content: "Something went wrong. Please try again.", ephemeral: true }).catch(() => {});
+      interaction.followUp({ content: `Something went wrong: ${error.message}`, ephemeral: true }).catch(() => {});
     } else {
-      interaction.reply({ content: "Something went wrong. Please try again.", ephemeral: true }).catch(() => {});
+      interaction.reply({ content: `Something went wrong: ${error.message}`, ephemeral: true }).catch(() => {});
     }
   }
 });
 
-// Handle staff messages in threads
+// Handle staff messages
 client.on(Events.MessageCreate, async message => {
   if (!message.guild || message.author.bot) return;
 
-  const ticket = [...tickets.values()].find(t => t.threadId === message.channel.id);
+  const ticket = [...tickets.values()].find(t => t.channelId === message.channel.id);
   if (!ticket) return;
 
   // Update last activity
@@ -170,7 +179,7 @@ client.on(Events.MessageCreate, async message => {
     await message.channel.send({ embeds: [embed] });
 
     const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
-    logChannel.send(`✅ Ticket claimed by ${message.author.tag} | Thread: ${message.channel.name}`);
+    logChannel.send(`✅ Ticket claimed by ${message.author.tag} | Channel: ${message.channel.name}`);
   }
 
   // Close ticket
@@ -179,14 +188,14 @@ client.on(Events.MessageCreate, async message => {
     if (user) await user.send("Your ticket has been closed. Thank you!");
 
     const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
-    logChannel.send(`❌ Ticket closed by ${message.author.tag} | Thread: ${message.channel.name}`);
+    logChannel.send(`❌ Ticket closed by ${message.author.tag} | Channel: ${message.channel.name}`);
 
     tickets.delete(ticket.userId);
     await message.channel.delete().catch(() => null);
   }
 });
 
-// Periodic check for inactivity
+// Periodic inactivity check
 setInterval(async () => {
   const now = Date.now();
   for (const [userId, ticket] of tickets) {
@@ -203,12 +212,12 @@ setInterval(async () => {
 
     // Close after 24 hours
     if (inactiveTime >= 24 * 60 * 60 * 1000) {
-      const thread = await client.channels.fetch(ticket.threadId).catch(() => null);
+      const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
       const user = await client.users.fetch(ticket.userId).catch(() => null);
 
       if (user) await user.send("Your ticket has been closed due to inactivity. Thank you!");
-      if (thread) await thread.send("Ticket closed automatically due to 24 hours of inactivity.").catch(() => null);
-      if (thread) await thread.delete().catch(() => null);
+      if (channel) await channel.send("Ticket closed automatically due to 24 hours of inactivity.").catch(() => null);
+      if (channel) await channel.delete().catch(() => null);
 
       tickets.delete(userId);
     }
@@ -216,3 +225,4 @@ setInterval(async () => {
 }, 60 * 60 * 1000); // every hour
 
 client.login(BOT_TOKEN);
+
