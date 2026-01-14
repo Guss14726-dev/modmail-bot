@@ -15,8 +15,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const MODMAIL_CATEGORY_ID = process.env.MODMAIL_CATEGORY_ID;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;
-const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
-const ONCALL_ROLE_NAME = "On Call";
+const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID; // Main staff role
+const ONCALL_ROLE_NAME = "On Call"; // Role for on-call notifications
 
 // CLIENT
 const client = new Client({
@@ -25,15 +25,14 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.MessageAttachments
+    GatewayIntentBits.GuildMembers
   ],
-  partials: [Partials.Channel, Partials.Message, Partials.User, Partials.GuildMember]
+  partials: [Partials.Channel]
 });
 
 // IN-MEMORY DATA
-const tickets = new Map();
-const blacklisted = new Set();
+const tickets = new Map();          // Active tickets
+const blacklisted = new Set();      // Blacklisted users by ID
 
 client.once(Events.ClientReady, () => console.log(`Logged in as ${client.user.tag}`));
 
@@ -49,22 +48,8 @@ async function forwardUserMessage(ticket, userMessage) {
     .setDescription(userMessage.content || "*No text content*")
     .setTimestamp();
 
-  // Include first attachment if exists
-  if (userMessage.attachments.size > 0) {
-    const firstAttachment = userMessage.attachments.first();
-    if (firstAttachment.contentType?.startsWith("image/")) {
-      embed.setImage(firstAttachment.url);
-    }
-  }
-
-  let contentPing = "";
-  if (!ticket.notifiedOnCall) {
-    const onCallRole = staffChannel.guild.roles.cache.find(r => r.name === ONCALL_ROLE_NAME);
-    if (onCallRole) contentPing = `<@&${onCallRole.id}>`;
-    ticket.notifiedOnCall = true;
-  }
-
-  await staffChannel.send({ content: contentPing, embeds: [embed] });
+  const onCallRole = staffChannel.guild.roles.cache.find(r => r.name === ONCALL_ROLE_NAME);
+  await staffChannel.send({ content: onCallRole ? `<@&${onCallRole.id}>` : "", embeds: [embed] });
 }
 
 async function forwardStaffMessage(ticket, staffMessage) {
@@ -77,13 +62,6 @@ async function forwardStaffMessage(ticket, staffMessage) {
     .setAuthor({ name: staffMessage.author.tag, iconURL: staffMessage.author.displayAvatarURL() })
     .setDescription(staffMessage.content || "*No text content*")
     .setTimestamp();
-
-  if (staffMessage.attachments.size > 0) {
-    const firstAttachment = staffMessage.attachments.first();
-    if (firstAttachment.contentType?.startsWith("image/")) {
-      embed.setImage(firstAttachment.url);
-    }
-  }
 
   await user.send({ content: `<@${user.id}>`, embeds: [embed] });
 }
@@ -150,8 +128,7 @@ client.on(Events.InteractionCreate, async interaction => {
       lastActivity: Date.now(),
       warningSent: false,
       claimed: false,
-      claimedBy: null,
-      notifiedOnCall: false
+      claimedBy: null
     });
 
     const member = await guild.members.fetch(interaction.user.id).catch(() => null);
@@ -174,7 +151,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
     const onCallRole = guild.roles.cache.find(r => r.name === ONCALL_ROLE_NAME);
     await channel.send({ content: onCallRole ? `<@&${onCallRole.id}>` : "", embeds: [ticketEmbed] });
-    tickets.get(interaction.user.id).notifiedOnCall = true;
 
     await interaction.update({
       content: `✅ Your ticket for **${category}** has been created! Staff will assist you shortly: <#${channel.id}>`,
@@ -197,6 +173,7 @@ client.on(Events.MessageCreate, async message => {
   const ticket = [...tickets.values()].find(t => t.channelId === message.channel.id);
   const content = message.content.toLowerCase();
 
+  // ---------- Ping Test ----------
   if (content === "!pong") return message.reply("🏓 Pong!");
 
   // ---------- On Call ----------
@@ -234,6 +211,7 @@ client.on(Events.MessageCreate, async message => {
   }
 
   if (!ticket) return;
+
   ticket.lastActivity = Date.now();
 
   // ---------- Ticket Claim ----------
@@ -249,6 +227,7 @@ client.on(Events.MessageCreate, async message => {
     return;
   }
 
+  // ---------- Staff Message Check ----------
   if (!ticket.claimed) return message.reply("⚠️ You have not claimed this ticket yet. Please run `!claim`.");
 
   // ---------- Forward Staff Message ----------
@@ -318,8 +297,7 @@ setInterval(async () => {
       tickets.delete(userId);
     }
   }
-}, 60 * 60 * 1000);
+}, 60 * 60 * 1000); // every hour
 
 // ---------- Login ----------
 client.login(BOT_TOKEN);
-
