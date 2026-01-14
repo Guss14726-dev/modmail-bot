@@ -61,16 +61,25 @@ client.on(Events.MessageCreate, async message => {
     });
   }
 
-  // Forward DM if ticket is confirmed
+  // Forward DM to staff as embed if ticket is confirmed
   if (ticket.confirmed) {
     ticket.lastActivity = Date.now(); // update last activity
+
     const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
     if (!channel) return;
-    await channel.send({ content: `**${message.author.tag}:** ${message.content}` });
+
+    const embed = new EmbedBuilder()
+      .setTitle("📩 New Message from User")
+      .setDescription(message.content || "*No text content*")
+      .setAuthor({ name: message.author.tag, iconURL: message.author.displayAvatarURL() })
+      .setColor(0x00AE86)
+      .setTimestamp();
+
+    await channel.send({ embeds: [embed] });
   }
 });
 
-// Handle select menu
+// Handle select menu for ticket category
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isStringSelectMenu() && interaction.customId === "ticket-category") {
@@ -158,10 +167,12 @@ client.on(Events.MessageCreate, async message => {
   // Update last activity
   ticket.lastActivity = Date.now();
 
-  // Forward staff messages to user
-  if (!message.content.startsWith("!")) {
+  // Forward staff messages to the user as text
+  if (!message.content.startsWith("!") && ticket) {
     const user = await client.users.fetch(ticket.userId).catch(() => null);
-    if (user) await user.send(`**Staff:** ${message.content}`);
+    if (user) {
+      await user.send(`**Staff:** ${message.content}`);
+    }
   }
 
   const content = message.content.toLowerCase();
@@ -225,4 +236,3 @@ setInterval(async () => {
 }, 60 * 60 * 1000); // every hour
 
 client.login(BOT_TOKEN);
-
