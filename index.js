@@ -17,7 +17,7 @@ const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 
-// Create client
+// CLIENT
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -29,52 +29,45 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-// In-memory ticket store
-const tickets = new Map();
+// IN-MEMORY DATA
+const tickets = new Map();          // Active tickets
+const blacklisted = new Set();      // Blacklisted users by ID
 
-client.once(Events.ClientReady, () => {
-  console.log(`Logged in as ${client.user.tag}`);
-});
+client.once(Events.ClientReady, () => console.log(`Logged in as ${client.user.tag}`));
 
 // ---------- Helper Functions ----------
-
-// Forward DM from user to staff as embed
 async function forwardUserMessage(ticket, userMessage) {
   const staffChannel = await client.channels.fetch(ticket.channelId).catch(() => null);
   if (!staffChannel) return;
-
   const embed = new EmbedBuilder()
     .setTitle("📩 New Message from User")
     .setColor(0x00AE86)
     .setAuthor({ name: userMessage.author.tag, iconURL: userMessage.author.displayAvatarURL() })
     .setDescription(userMessage.content || "*No text content*")
     .setTimestamp();
-
   await staffChannel.send({ embeds: [embed] });
 }
 
-// Forward staff message to user as embed
 async function forwardStaffMessage(ticket, staffMessage) {
   const user = await client.users.fetch(ticket.userId).catch(() => null);
   if (!user) return;
-
   const embed = new EmbedBuilder()
     .setTitle("📩 Message from Support Team")
     .setColor(0xFFA500)
     .setAuthor({ name: staffMessage.author.tag, iconURL: staffMessage.author.displayAvatarURL() })
     .setDescription(staffMessage.content || "*No text content*")
     .setTimestamp();
-
   await user.send({ embeds: [embed] });
 }
 
 // ---------- DM Handling ----------
-
 client.on(Events.MessageCreate, async message => {
   if (message.author.bot || message.guild) return;
 
-  let ticket = tickets.get(message.author.id);
+  // Check if user is blacklisted
+  if (blacklisted.has(message.author.id)) return;
 
+  let ticket = tickets.get(message.author.id);
   if (!ticket) {
     const categories = new StringSelectMenuBuilder()
       .setCustomId("ticket-category")
@@ -99,16 +92,18 @@ client.on(Events.MessageCreate, async message => {
 });
 
 // ---------- Category Selection / Ticket Creation ----------
-
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (!interaction.isStringSelectMenu() || interaction.customId !== "ticket-category") return;
+
+    if (blacklisted.has(interaction.user.id)) {
+      return interaction.update({ content: "❌ You are not allowed to open tickets.", components: [] });
+    }
 
     const category = interaction.values[0];
     const guild = client.guilds.cache.get(MAIN_GUILD_ID);
     if (!guild) return interaction.update({ content: "Could not find main server.", components: [] });
 
-    // Create ticket channel
     const channel = await guild.channels.create({
       name: `ticket-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
       type: ChannelType.GuildText,
@@ -127,7 +122,8 @@ client.on(Events.InteractionCreate, async interaction => {
       channelId: channel.id,
       lastActivity: Date.now(),
       warningSent: false,
-      claimed: false // staff must claim before interacting
+      claimed: false,
+      claimedBy: null
     });
 
     const member = await guild.members.fetch(interaction.user.id).catch(() => null);
@@ -160,8 +156,7 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 });
 
-// ---------- Staff & Ticket Commands ----------
-
+// ---------- Staff Commands ----------
 client.on(Events.MessageCreate, async message => {
   if (!message.guild || message.author.bot) return;
 
@@ -169,21 +164,20 @@ client.on(Events.MessageCreate, async message => {
   if (!member) return;
 
   const ticket = [...tickets.values()].find(t => t.channelId === message.channel.id);
-
   const content = message.content.toLowerCase();
 
-  // ---------- On Call Commands (Staff Only) ----------
+  // ---------- Ping Test ----------
+  if (content === "!pong") return message.reply("🏓 Pong!");
+
+  // ---------- On Call ----------
   if (member.roles.cache.has(STAFF_ROLE_ID)) {
     if (content === "!oncall") {
       let role = message.guild.roles.cache.find(r => r.name === "On Call");
-      if (!role) {
-        role = await message.guild.roles.create({ name: "On Call", color: 0x00AE86, reason: "On-call role" });
-      }
+      if (!role) role = await message.guild.roles.create({ name: "On Call", color: 0x00AE86, reason: "On-call role" });
       if (member.roles.cache.has(role.id)) return message.reply("You are already On Call.");
       await member.roles.add(role);
       return message.reply("✅ You are now On Call!");
     }
-
     if (content === "!offcall") {
       const role = message.guild.roles.cache.find(r => r.name === "On Call");
       if (!role || !member.roles.cache.has(role.id)) return message.reply("You are not currently On Call.");
@@ -192,33 +186,40 @@ client.on(Events.MessageCreate, async message => {
     }
   }
 
+  // ---------- Blacklist User ----------
+  if (member.roles.cache.has(STAFF_ROLE_ID) && content.startsWith("!b ")) {
+    const userId = content.split(" ")[1].replace(/[<@!>]/g, "");
+    if (!userId) return message.reply("❌ Please provide a user ID or mention.");
+    blacklisted.add(userId);
+    return message.reply(`✅ <@${userId}> has been blacklisted from opening tickets.`);
+  }
+
   if (!ticket) return;
 
   ticket.lastActivity = Date.now();
 
-  // ---------- Staff Interaction Check ----------
-  if (!ticket.claimed && !content.startsWith("!claim")) {
-    return message.reply("⚠️ You have not claimed this ticket yet. Please run `!claim`.");
-  }
-
-  // ---------- Forward Staff Message ----------
-  if (!content.startsWith("!")) await forwardStaffMessage(ticket, message);
-
-  // ---------- Claim Ticket ----------
+  // ---------- Ticket Claim ----------
   if (content === "!claim") {
+    if (ticket.claimed) return message.reply(`❌ This ticket is already claimed by <@${ticket.claimedBy}>.`);
     ticket.claimed = true;
+    ticket.claimedBy = message.author.id;
     const embed = new EmbedBuilder()
       .setTitle("✅ Ticket Claimed")
       .setColor(0x00AE86)
       .setDescription(`This ticket has been claimed by ${message.author.tag}. You can now reply to the user.`);
     await message.channel.send({ embeds: [embed] });
+    return;
   }
+
+  // ---------- Staff Message Check ----------
+  if (!ticket.claimed) return message.reply("⚠️ You have not claimed this ticket yet. Please run `!claim`.");
+
+  // ---------- Forward Staff Message ----------
+  if (!content.startsWith("!")) await forwardStaffMessage(ticket, message);
 
   // ---------- Close Ticket ----------
   if (content === "!close") {
-    if (!member.roles.cache.has(STAFF_ROLE_ID))
-      return message.reply("❌ You do not have permission to close this ticket.");
-
+    if (!member.roles.cache.has(STAFF_ROLE_ID)) return message.reply("❌ You do not have permission to close this ticket.");
     const user = await client.users.fetch(ticket.userId).catch(() => null);
     if (user) {
       const closeEmbed = new EmbedBuilder()
@@ -227,7 +228,6 @@ client.on(Events.MessageCreate, async message => {
         .setDescription("Your ticket has been closed by the support team. Thank you!");
       await user.send({ embeds: [closeEmbed] });
     }
-
     tickets.delete(ticket.userId);
     await message.channel.delete().catch(() => null);
   }
