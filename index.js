@@ -14,7 +14,7 @@ const {
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MODMAIL_CATEGORY_ID = process.env.MODMAIL_CATEGORY_ID; // Category for tickets
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;           // Log channel
-const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;           // Your main server ID
+const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;            // Main server ID
 
 // Create client
 const client = new Client({
@@ -38,7 +38,7 @@ client.once(Events.ClientReady, () => {
 // Handle DMs from users
 client.on(Events.MessageCreate, async message => {
   if (message.author.bot) return;
-  if (message.guild) return; // Only handle DMs
+  if (message.guild) return; // Only DMs
 
   let ticket = tickets.get(message.author.id);
 
@@ -61,9 +61,9 @@ client.on(Events.MessageCreate, async message => {
     });
   }
 
-  // Forward DM to staff as embed if ticket is confirmed
+  // Forward DM to staff as embed
   if (ticket.confirmed) {
-    ticket.lastActivity = Date.now(); // update last activity
+    ticket.lastActivity = Date.now();
 
     const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
     if (!channel) return;
@@ -79,16 +79,15 @@ client.on(Events.MessageCreate, async message => {
   }
 });
 
-// Handle select menu for ticket category
+// Handle ticket category selection
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isStringSelectMenu() && interaction.customId === "ticket-category") {
       const selected = interaction.values[0];
-
       const guild = client.guilds.cache.get(MAIN_GUILD_ID);
       if (!guild) return interaction.update({ content: "Could not find main server.", components: [] });
 
-      // Create ticket channel under category
+      // Create ticket channel
       const channel = await guild.channels.create({
         name: `ticket-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
         type: ChannelType.GuildText,
@@ -115,16 +114,25 @@ client.on(Events.InteractionCreate, async interaction => {
         warningSent: false
       });
 
-      // Fetch member info for logging
-      let memberData = null;
+      // Fetch member info
       const member = await guild.members.fetch(interaction.user.id).catch(() => null);
-      if (member) {
-        memberData = {
-          id: member.id,
-          username: member.user.tag,
-          roles: member.roles.cache.filter(r => r.id !== guild.id).map(r => r.name)
-        };
-      }
+      const rolesText = member
+        ? member.roles.cache.filter(r => r.id !== guild.id).map(r => r.name).join(", ") || "N/A"
+        : "N/A";
+
+      // Initial embed in ticket channel for staff
+      const welcomeEmbed = new EmbedBuilder()
+        .setTitle(`🎫 Ticket Opened by ${interaction.user.tag}`)
+        .setDescription(`A new ticket has been opened.`)
+        .addFields(
+          { name: "User ID", value: interaction.user.id, inline: true },
+          { name: "Roles", value: rolesText, inline: true },
+          { name: "Opened At", value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+        )
+        .setColor(0x00AE86)
+        .setTimestamp();
+
+      await channel.send({ embeds: [welcomeEmbed] });
 
       // Log ticket creation with @here ping
       const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
@@ -133,7 +141,7 @@ client.on(Events.InteractionCreate, async interaction => {
         .addFields(
           { name: "User", value: interaction.user.tag, inline: true },
           { name: "User ID", value: interaction.user.id, inline: true },
-          { name: "Roles", value: memberData?.roles.join(", ") || "N/A" },
+          { name: "Roles", value: rolesText },
           { name: "Category", value: selected }
         )
         .setColor(0x00AE86)
@@ -164,15 +172,21 @@ client.on(Events.MessageCreate, async message => {
   const ticket = [...tickets.values()].find(t => t.channelId === message.channel.id);
   if (!ticket) return;
 
-  // Update last activity
   ticket.lastActivity = Date.now();
 
-  // Forward staff messages to the user as text
+  // Forward staff message to user as embed
   if (!message.content.startsWith("!") && ticket) {
     const user = await client.users.fetch(ticket.userId).catch(() => null);
-    if (user) {
-      await user.send(`**Staff:** ${message.content}`);
-    }
+    if (!user) return;
+
+    const staffEmbed = new EmbedBuilder()
+      .setTitle("📩 Message from Staff")
+      .setDescription(message.content || "*No text content*")
+      .setAuthor({ name: message.author.tag, iconURL: message.author.displayAvatarURL() })
+      .setColor(0xFFA500)
+      .setTimestamp();
+
+    await user.send({ embeds: [staffEmbed] });
   }
 
   const content = message.content.toLowerCase();
