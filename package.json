@@ -1,0 +1,15 @@
+{
+  "name": "discord-modmail-bot",
+  "version": "1.0.0",
+  "description": "ModMail bot for Discord",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "discord.js": "^14.11.0"
+  }
+}
