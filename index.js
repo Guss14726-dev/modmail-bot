@@ -38,7 +38,7 @@ client.once(Events.ClientReady, async () => {
 
   try {
     // Set professional bot status
-    await client.user.setActivity('ModMail Tickets', { type: 'Watching' });
+    await client.user.setActivity('For Tickets', { type: 'Listening' });
     await client.user.setStatus('idle');
     console.log('✅ Bot status set successfully');
   } catch (err) {
@@ -282,3 +282,4 @@ setInterval(async () => {
 }, 60*60*1000);
 
 client.login(BOT_TOKEN);
+
