@@ -33,12 +33,17 @@ const client = new Client({
 const tickets = new Map();
 const blacklisted = new Set();
 
-client.once(Events.ClientReady, () => {
+client.once(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  // Set professional bot status
-  client.user.setActivity('ModMail Tickets', { type: 'Watching' });
-  client.user.setStatus('idle');
+  try {
+    // Set professional bot status
+    await client.user.setActivity('ModMail Tickets', { type: 'Watching' });
+    await client.user.setStatus('idle');
+    console.log('✅ Bot status set successfully');
+  } catch (err) {
+    console.error('❌ Failed to set bot status:', err);
+  }
 
   console.log(`Current open tickets: ${tickets.size}`);
 });
