@@ -5,8 +5,6 @@ const {
   Events,
   ChannelType,
   ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   StringSelectMenuBuilder,
   EmbedBuilder
 } = require("discord.js");
@@ -64,89 +62,72 @@ client.on(Events.MessageCreate, async message => {
 
   // Forward DM if ticket is confirmed
   if (ticket.confirmed) {
+    ticket.lastActivity = Date.now(); // update last activity
     const thread = await client.channels.fetch(ticket.threadId).catch(() => null);
     if (!thread) return;
     await thread.send({ content: `**${message.author.tag}:** ${message.content}` });
   }
 });
 
-// Handle select menu and buttons
+// Handle select menu
 client.on(Events.InteractionCreate, async interaction => {
   try {
-    // Ticket category selection
     if (interaction.isStringSelectMenu() && interaction.customId === "ticket-category") {
       const selected = interaction.values[0];
-      tickets.set(interaction.user.id, { userId: interaction.user.id, category: selected, confirmed: false });
 
-      const yesButton = new ButtonBuilder().setCustomId("confirm-yes").setLabel("Yes").setStyle(ButtonStyle.Success);
-      const noButton = new ButtonBuilder().setCustomId("confirm-no").setLabel("No").setStyle(ButtonStyle.Danger);
-      const row = new ActionRowBuilder().addComponents(yesButton, noButton);
-
-      // Respond immediately to prevent "interaction failed"
-      await interaction.update({
-        content: `You selected **${selected}**. Are you sure you want to open this ticket?`,
-        components: [row]
+      // Create ticket immediately
+      const channel = await client.channels.fetch(MODMAIL_CHANNEL_ID);
+      const thread = await channel.threads.create({
+        name: `Ticket - ${interaction.user.username}`,
+        type: ChannelType.PrivateThread,
+        parent: MODMAIL_CHANNEL_ID
       });
-    }
 
-    // Handle Yes/No buttons
-    if (interaction.isButton()) {
-      const ticket = tickets.get(interaction.user.id);
-      if (!ticket) return;
+      tickets.set(interaction.user.id, {
+        userId: interaction.user.id,
+        category: selected,
+        confirmed: true,
+        threadId: thread.id,
+        lastActivity: Date.now(),
+        warningSent: false
+      });
 
-      if (interaction.customId === "confirm-no") {
-        tickets.delete(interaction.user.id);
-        return interaction.update({ content: "Ticket creation canceled.", components: [] });
-      }
-
-      if (interaction.customId === "confirm-yes") {
-        ticket.confirmed = true;
-
-        // Create thread in staff channel
-        const channel = await client.channels.fetch(MODMAIL_CHANNEL_ID);
-        const thread = await channel.threads.create({
-          name: `Ticket - ${interaction.user.username}`,
-          type: ChannelType.PrivateThread,
-          parent: MODMAIL_CHANNEL_ID
-        });
-        ticket.threadId = thread.id;
-
-        // Fetch guild member info
-        const mainGuild = client.guilds.cache.get(MAIN_GUILD_ID);
-        let memberData = null;
-        if (mainGuild) {
-          const member = await mainGuild.members.fetch(interaction.user.id).catch(() => null);
-          if (member) {
-            memberData = {
-              id: member.id,
-              username: member.user.tag,
-              roles: member.roles.cache
-                .filter(role => role.id !== mainGuild.id)
-                .map(r => r.name)
-            };
-          }
+      // Fetch guild member info
+      const mainGuild = client.guilds.cache.get(MAIN_GUILD_ID);
+      let memberData = null;
+      if (mainGuild) {
+        const member = await mainGuild.members.fetch(interaction.user.id).catch(() => null);
+        if (member) {
+          memberData = {
+            id: member.id,
+            username: member.user.tag,
+            roles: member.roles.cache
+              .filter(role => role.id !== mainGuild.id)
+              .map(r => r.name)
+          };
         }
-
-        // Log ticket creation in log channel with @here ping
-        const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
-        const logEmbed = new EmbedBuilder()
-          .setTitle("📩 New Ticket Created")
-          .addFields(
-            { name: "User", value: interaction.user.tag, inline: true },
-            { name: "User ID", value: interaction.user.id, inline: true },
-            { name: "Roles", value: memberData?.roles.join(", ") || "N/A" },
-            { name: "Category", value: ticket.category }
-          )
-          .setColor(0x00AE86)
-          .setTimestamp();
-        await logChannel.send({ content: "@here", embeds: [logEmbed] });
-
-        // Confirm to user
-        await interaction.update({
-          content: "Your ticket has been created! Staff will assist you shortly.",
-          components: []
-        });
       }
+
+      // Log ticket creation with @here ping
+      const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
+      const logEmbed = new EmbedBuilder()
+        .setTitle("📩 New Ticket Created")
+        .addFields(
+          { name: "User", value: interaction.user.tag, inline: true },
+          { name: "User ID", value: interaction.user.id, inline: true },
+          { name: "Roles", value: memberData?.roles.join(", ") || "N/A" },
+          { name: "Category", value: selected }
+        )
+        .setColor(0x00AE86)
+        .setTimestamp();
+
+      await logChannel.send({ content: "@here", embeds: [logEmbed] });
+
+      // Confirm to user
+      await interaction.update({
+        content: `Your ticket for **${selected}** has been created! Staff will assist you shortly.`,
+        components: []
+      });
     }
   } catch (error) {
     console.error("Interaction error:", error);
@@ -158,13 +139,15 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 });
 
-// Handle staff messages inside threads
+// Handle staff messages in threads
 client.on(Events.MessageCreate, async message => {
   if (!message.guild || message.author.bot) return;
 
-  // Find ticket for this thread
   const ticket = [...tickets.values()].find(t => t.threadId === message.channel.id);
   if (!ticket) return;
+
+  // Update last activity
+  ticket.lastActivity = Date.now();
 
   // Forward staff messages to user
   if (!message.content.startsWith("!")) {
@@ -203,5 +186,33 @@ client.on(Events.MessageCreate, async message => {
   }
 });
 
-client.login(BOT_TOKEN);
+// Periodic check for inactivity
+setInterval(async () => {
+  const now = Date.now();
+  for (const [userId, ticket] of tickets) {
+    const inactiveTime = now - ticket.lastActivity;
 
+    // 6-hour warning (after 18 hours)
+    if (!ticket.warningSent && inactiveTime >= 18 * 60 * 60 * 1000) {
+      ticket.warningSent = true;
+      const user = await client.users.fetch(ticket.userId).catch(() => null);
+      if (user) {
+        user.send(`Dear <@${user.id}>,\n\n6 hours from now your ticket will be automatically closed if no action is taken. If you would like to keep it open, please respond.`);
+      }
+    }
+
+    // Close after 24 hours
+    if (inactiveTime >= 24 * 60 * 60 * 1000) {
+      const thread = await client.channels.fetch(ticket.threadId).catch(() => null);
+      const user = await client.users.fetch(ticket.userId).catch(() => null);
+
+      if (user) await user.send("Your ticket has been closed due to inactivity. Thank you!");
+      if (thread) await thread.send("Ticket closed automatically due to 24 hours of inactivity.").catch(() => null);
+      if (thread) await thread.delete().catch(() => null);
+
+      tickets.delete(userId);
+    }
+  }
+}, 60 * 60 * 1000); // every hour
+
+client.login(BOT_TOKEN);
