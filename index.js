@@ -11,149 +11,176 @@ const {
   EmbedBuilder
 } = require("discord.js");
 
+// CONFIG
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const MODMAIL_CHANNEL_ID = process.env.MODMAIL_CHANNEL_ID; // Staff-only channel
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;         // Log channel
+const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;           // Your main server ID
+
+// Create client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers
   ],
   partials: [Partials.Channel]
 });
 
-// CONFIG
-const MODMAIL_CHANNEL_ID = process.env.MODMAIL_CHANNEL_ID; // Staff-only channel
-const MODMAIL_CATEGORY_ID = "1459850628976214221";         // Category for threads
-const LOG_CHANNEL_ID = "1459850629513084990";              // Logs
-
-// In-memory tickets: { userId, threadId, category, confirmed }
+// In-memory ticket store
 const tickets = new Map();
 
 client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// Handle user DMs
+// Handle DMs from users
 client.on(Events.MessageCreate, async message => {
   if (message.author.bot) return;
+  if (message.guild) return; // Only handle DMs here
 
-  if (!message.guild) {
-    const ticket = tickets.get(message.author.id);
+  let ticket = tickets.get(message.author.id);
 
-    if (!ticket) {
-      // Start ticket creation: category select menu
-      const categories = new StringSelectMenuBuilder()
-        .setCustomId("ticket-category")
-        .setPlaceholder("Select a category")
-        .addOptions([
-          { label: "Product Support", value: "Product Support" },
-          { label: "General Support", value: "General Support" },
-          { label: "Giveaway Win", value: "Giveaway Win" }
-        ]);
+  // Start ticket creation
+  if (!ticket) {
+    const categories = new StringSelectMenuBuilder()
+      .setCustomId("ticket-category")
+      .setPlaceholder("Select a category")
+      .addOptions([
+        { label: "Product Support", value: "Product Support" },
+        { label: "General Support", value: "General Support" },
+        { label: "Giveaway Win", value: "Giveaway Win" }
+      ]);
 
-      const row = new ActionRowBuilder().addComponents(categories);
+    const row = new ActionRowBuilder().addComponents(categories);
 
-      return message.channel.send({
-        content: "Welcome! Please select a category for your ticket:",
-        components: [row]
-      });
-    }
+    return message.channel.send({
+      content: "Welcome! Please select a category for your ticket:",
+      components: [row]
+    });
+  }
 
-    // If ticket exists and confirmed, forward DM to thread
-    if (ticket.confirmed) {
-      const thread = await client.channels.fetch(ticket.threadId).catch(() => null);
-      if (!thread) return;
-      await thread.send(`**${message.author.tag}:** ${message.content}`);
-    }
+  // Forward DM if ticket is confirmed
+  if (ticket.confirmed) {
+    const thread = await client.channels.fetch(ticket.threadId).catch(() => null);
+    if (!thread) return;
+    await thread.send({ content: `**${message.author.tag}:** ${message.content}` });
   }
 });
 
-// Handle interactions (select menu & buttons)
+// Handle select menu and buttons
 client.on(Events.InteractionCreate, async interaction => {
-  // Select menu for category
-  if (interaction.isStringSelectMenu()) {
-    if (interaction.customId === "ticket-category") {
-      const selected = interaction.values[0];
-      tickets.set(interaction.user.id, { userId: interaction.user.id, category: selected, confirmed: false });
+  // Ticket category selection
+  if (interaction.isStringSelectMenu() && interaction.customId === "ticket-category") {
+    const selected = interaction.values[0];
+    tickets.set(interaction.user.id, { userId: interaction.user.id, category: selected, confirmed: false });
 
-      const yesButton = new ButtonBuilder().setCustomId("confirm-yes").setLabel("Yes").setStyle(ButtonStyle.Success);
-      const noButton = new ButtonBuilder().setCustomId("confirm-no").setLabel("No").setStyle(ButtonStyle.Danger);
-      const row = new ActionRowBuilder().addComponents(yesButton, noButton);
+    const yesButton = new ButtonBuilder().setCustomId("confirm-yes").setLabel("Yes").setStyle(ButtonStyle.Success);
+    const noButton = new ButtonBuilder().setCustomId("confirm-no").setLabel("No").setStyle(ButtonStyle.Danger);
+    const row = new ActionRowBuilder().addComponents(yesButton, noButton);
 
-      await interaction.update({ content: `You selected **${selected}**. Are you sure you want to open this ticket?`, components: [row] });
-    }
+    return interaction.update({
+      content: `You selected **${selected}**. Are you sure you want to open this ticket?`,
+      components: [row]
+    });
   }
 
-  // Buttons Yes/No
+  // Handle Yes/No buttons
   if (interaction.isButton()) {
     const ticket = tickets.get(interaction.user.id);
     if (!ticket) return;
 
     if (interaction.customId === "confirm-no") {
       tickets.delete(interaction.user.id);
-      await interaction.update({ content: "Ticket creation canceled.", components: [] });
-      return;
+      return interaction.update({ content: "Ticket creation canceled.", components: [] });
     }
 
     if (interaction.customId === "confirm-yes") {
       ticket.confirmed = true;
+
+      // Fetch guild member info
+      const mainGuild = client.guilds.cache.get(MAIN_GUILD_ID);
+      let memberData = null;
+      if (mainGuild) {
+        const member = await mainGuild.members.fetch(interaction.user.id).catch(() => null);
+        if (member) {
+          memberData = {
+            id: member.id,
+            username: member.user.tag,
+            roles: member.roles.cache
+              .filter(role => role.id !== mainGuild.id)
+              .map(r => r.name)
+          };
+        }
+      }
 
       // Create thread in staff channel
       const channel = await client.channels.fetch(MODMAIL_CHANNEL_ID);
       const thread = await channel.threads.create({
         name: `Ticket - ${interaction.user.username}`,
         type: ChannelType.PrivateThread,
-        parent: MODMAIL_CATEGORY_ID
+        parent: MODMAIL_CHANNEL_ID
       });
       ticket.threadId = thread.id;
 
-      // Log ticket creation
+      // Send log to log channel
       const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
-      logChannel.send(`📩 Ticket created by ${interaction.user.tag} | Category: ${ticket.category} | Thread: ${thread.name}`);
+      const logEmbed = new EmbedBuilder()
+        .setTitle("📩 New Ticket Created")
+        .addFields(
+          { name: "User", value: interaction.user.tag, inline: true },
+          { name: "User ID", value: interaction.user.id, inline: true },
+          { name: "Roles", value: memberData?.roles.join(", ") || "N/A" },
+          { name: "Category", value: ticket.category }
+        )
+        .setColor(0x00AE86)
+        .setTimestamp();
+      logChannel.send({ embeds: [logEmbed] });
 
-      await interaction.update({ content: `Your ticket has been created! Staff will assist you shortly.`, components: [] });
-
-      return;
+      // Confirm to user
+      await interaction.update({
+        content: "Your ticket has been created! Staff will assist you shortly.",
+        components: []
+      });
     }
   }
 });
 
-// Handle staff commands and forwarding messages
+// Handle staff messages inside threads
 client.on(Events.MessageCreate, async message => {
-  if (!message.guild) return;
-  if (message.author.bot) return;
+  if (!message.guild || message.author.bot) return;
 
-  // Check if message is inside a ModMail thread
+  // Find ticket for this thread
   const ticket = [...tickets.values()].find(t => t.threadId === message.channel.id);
   if (!ticket) return;
 
-  // Forward user messages
+  // Forward staff messages to user
   if (!message.content.startsWith("!")) {
-    const user = await client.users.fetch(ticket.userId);
-    await user.send(`**Staff:** ${message.content}`);
+    const user = await client.users.fetch(ticket.userId).catch(() => null);
+    if (user) await user.send(`**Staff:** ${message.content}`);
   }
 
-  // Commands
   const content = message.content.toLowerCase();
 
-  // !claim
+  // Claim ticket
   if (content === "!claim") {
     const embed = new EmbedBuilder()
-      .setTitle("**Thanks for contacting our team!**")
+      .setTitle("✅ Ticket Claimed")
       .setDescription(
-        "Thank you for contacting the VaultTech Support Team. We are pleased to inform you that you have been successfully connected with one of our support representatives, who is ready to assist you.\n\n" +
-        "To ensure we can assist you with your inquiry as quickly as possible, we kindly ask that you provide a clear explanation of the reason for opening your ticket. This will help us better understand your needs and provide the support you require without delay.\n\n" +
-        "**Best regards,**\n*VaultTech Support Team*"
+        "You have successfully connected with our support team.\n\n" +
+        "Please provide a clear explanation of your issue so we can assist you efficiently.\n\n" +
+        "**Thank you!**"
       )
       .setColor(0x00AE86);
-
     await message.channel.send({ embeds: [embed] });
 
     const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
     logChannel.send(`✅ Ticket claimed by ${message.author.tag} | Thread: ${message.channel.name}`);
   }
 
-  // !close
+  // Close ticket
   if (content === "!close") {
     const user = await client.users.fetch(ticket.userId).catch(() => null);
     if (user) await user.send("Your ticket has been closed. Thank you!");
@@ -162,8 +189,9 @@ client.on(Events.MessageCreate, async message => {
     logChannel.send(`❌ Ticket closed by ${message.author.tag} | Thread: ${message.channel.name}`);
 
     tickets.delete(ticket.userId);
-    await message.channel.delete();
+    await message.channel.delete().catch(() => null);
   }
 });
 
-client.login(process.env.BOT_TOKEN);
+client.login(BOT_TOKEN);
+
