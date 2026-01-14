@@ -33,7 +33,15 @@ const client = new Client({
 const tickets = new Map();
 const blacklisted = new Set();
 
-client.once(Events.ClientReady, () => console.log(`Logged in as ${client.user.tag}`));
+client.once(Events.ClientReady, () => {
+  console.log(`Logged in as ${client.user.tag}`);
+
+  // Set professional bot status
+  client.user.setActivity('ModMail Tickets', { type: 'Watching' });
+  client.user.setStatus('idle');
+
+  console.log(`Current open tickets: ${tickets.size}`);
+});
 
 // Helper to safely get image
 function getFirstImage(message) {
