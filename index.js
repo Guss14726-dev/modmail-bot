@@ -126,7 +126,8 @@ client.on(Events.InteractionCreate, async interaction => {
       confirmed: true,
       channelId: channel.id,
       lastActivity: Date.now(),
-      warningSent: false
+      warningSent: false,
+      claimed: false // staff must claim before interacting
     });
 
     const member = await guild.members.fetch(interaction.user.id).catch(() => null);
@@ -148,20 +149,6 @@ client.on(Events.InteractionCreate, async interaction => {
       .setTimestamp();
     await channel.send({ embeds: [ticketEmbed] });
 
-    // Log with @here ping
-    const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
-    const logEmbed = new EmbedBuilder()
-      .setTitle("📩 New Ticket Created")
-      .setColor(0x00AE86)
-      .setDescription(`Ticket for **${category}** opened by <@${interaction.user.id}>`)
-      .addFields(
-        { name: "User ID", value: interaction.user.id, inline: true },
-        { name: "Roles", value: rolesText, inline: true },
-        { name: "Channel", value: `<#${channel.id}>`, inline: true }
-      )
-      .setTimestamp();
-    await logChannel.send({ content: "@here", embeds: [logEmbed] });
-
     await interaction.update({
       content: `✅ Your ticket for **${category}** has been created! Staff will assist you shortly: <#${channel.id}>`,
       components: []
@@ -182,48 +169,8 @@ client.on(Events.MessageCreate, async message => {
   if (!member) return;
 
   const ticket = [...tickets.values()].find(t => t.channelId === message.channel.id);
-  if (ticket) ticket.lastActivity = Date.now();
 
   const content = message.content.toLowerCase();
-
-  // ---------- Ticket Forwarding ----------
-  if (ticket && !content.startsWith("!")) await forwardStaffMessage(ticket, message);
-
-  // ---------- Claim Ticket ----------
-  if (content === "!claim" && ticket) {
-    const embed = new EmbedBuilder()
-      .setTitle("✅ Ticket Claimed")
-      .setColor(0x00AE86)
-      .setDescription(`This ticket has been claimed by ${message.author.tag}. Please respond to the user.`);
-    await message.channel.send({ embeds: [embed] });
-  }
-
-  // ---------- Close Ticket ----------
-  if (content === "!close" && ticket) {
-    if (!member.roles.cache.has(STAFF_ROLE_ID))
-      return message.reply("❌ You do not have permission to close this ticket.");
-
-    const user = await client.users.fetch(ticket.userId).catch(() => null);
-    if (user) {
-      const closeEmbed = new EmbedBuilder()
-        .setTitle("❌ Ticket Closed")
-        .setColor(0xFF0000)
-        .setDescription("Your ticket has been closed by the support team. Thank you!");
-      await user.send({ embeds: [closeEmbed] });
-    }
-
-    const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
-    const logEmbed = new EmbedBuilder()
-      .setTitle("❌ Ticket Closed")
-      .setColor(0xFF0000)
-      .setDescription(`Ticket closed by ${message.author.tag}`)
-      .addFields({ name: "Channel", value: `<#${message.channel.id}>` }, { name: "User ID", value: ticket.userId })
-      .setTimestamp();
-    await logChannel.send({ embeds: [logEmbed] });
-
-    tickets.delete(ticket.userId);
-    await message.channel.delete().catch(() => null);
-  }
 
   // ---------- On Call Commands (Staff Only) ----------
   if (member.roles.cache.has(STAFF_ROLE_ID)) {
@@ -243,6 +190,46 @@ client.on(Events.MessageCreate, async message => {
       await member.roles.remove(role);
       return message.reply("✅ You are no longer On Call.");
     }
+  }
+
+  if (!ticket) return;
+
+  ticket.lastActivity = Date.now();
+
+  // ---------- Staff Interaction Check ----------
+  if (!ticket.claimed && !content.startsWith("!claim")) {
+    return message.reply("⚠️ You have not claimed this ticket yet. Please run `!claim`.");
+  }
+
+  // ---------- Forward Staff Message ----------
+  if (!content.startsWith("!")) await forwardStaffMessage(ticket, message);
+
+  // ---------- Claim Ticket ----------
+  if (content === "!claim") {
+    ticket.claimed = true;
+    const embed = new EmbedBuilder()
+      .setTitle("✅ Ticket Claimed")
+      .setColor(0x00AE86)
+      .setDescription(`This ticket has been claimed by ${message.author.tag}. You can now reply to the user.`);
+    await message.channel.send({ embeds: [embed] });
+  }
+
+  // ---------- Close Ticket ----------
+  if (content === "!close") {
+    if (!member.roles.cache.has(STAFF_ROLE_ID))
+      return message.reply("❌ You do not have permission to close this ticket.");
+
+    const user = await client.users.fetch(ticket.userId).catch(() => null);
+    if (user) {
+      const closeEmbed = new EmbedBuilder()
+        .setTitle("❌ Ticket Closed")
+        .setColor(0xFF0000)
+        .setDescription("Your ticket has been closed by the support team. Thank you!");
+      await user.send({ embeds: [closeEmbed] });
+    }
+
+    tickets.delete(ticket.userId);
+    await message.channel.delete().catch(() => null);
   }
 });
 
