@@ -186,12 +186,21 @@ client.on(Events.MessageCreate, async message => {
     }
   }
 
-  // ---------- Blacklist User ----------
-  if (member.roles.cache.has(STAFF_ROLE_ID) && content.startsWith("!b ")) {
-    const userId = content.split(" ")[1].replace(/[<@!>]/g, "");
-    if (!userId) return message.reply("❌ Please provide a user ID or mention.");
-    blacklisted.add(userId);
-    return message.reply(`✅ <@${userId}> has been blacklisted from opening tickets.`);
+  // ---------- Blacklist / Un-blacklist ----------
+  if (member.roles.cache.has(STAFF_ROLE_ID)) {
+    if (content.startsWith("!b ")) {
+      const userId = content.split(" ")[1].replace(/[<@!>]/g, "");
+      if (!userId) return message.reply("❌ Please provide a user ID or mention.");
+      blacklisted.add(userId);
+      return message.reply(`✅ <@${userId}> has been blacklisted from opening tickets.`);
+    }
+    if (content.startsWith("!un ")) {
+      const userId = content.split(" ")[1].replace(/[<@!>]/g, "");
+      if (!userId) return message.reply("❌ Please provide a user ID or mention.");
+      if (!blacklisted.has(userId)) return message.reply("⚠️ This user is not blacklisted.");
+      blacklisted.delete(userId);
+      return message.reply(`✅ <@${userId}> has been removed from the blacklist and can now open tickets.`);
+    }
   }
 
   if (!ticket) return;
