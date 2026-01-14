@@ -15,7 +15,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const MODMAIL_CATEGORY_ID = process.env.MODMAIL_CATEGORY_ID;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;
-const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
+const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID; // Main staff role
+const ONCALL_ROLE_NAME = "On Call"; // Role for on-call notifications
 
 // CLIENT
 const client = new Client({
@@ -39,32 +40,36 @@ client.once(Events.ClientReady, () => console.log(`Logged in as ${client.user.ta
 async function forwardUserMessage(ticket, userMessage) {
   const staffChannel = await client.channels.fetch(ticket.channelId).catch(() => null);
   if (!staffChannel) return;
+
   const embed = new EmbedBuilder()
     .setTitle("📩 New Message from User")
     .setColor(0x00AE86)
     .setAuthor({ name: userMessage.author.tag, iconURL: userMessage.author.displayAvatarURL() })
     .setDescription(userMessage.content || "*No text content*")
     .setTimestamp();
-  await staffChannel.send({ embeds: [embed] });
+
+  const onCallRole = staffChannel.guild.roles.cache.find(r => r.name === ONCALL_ROLE_NAME);
+  await staffChannel.send({ content: onCallRole ? `<@&${onCallRole.id}>` : "", embeds: [embed] });
 }
 
 async function forwardStaffMessage(ticket, staffMessage) {
   const user = await client.users.fetch(ticket.userId).catch(() => null);
   if (!user) return;
+
   const embed = new EmbedBuilder()
     .setTitle("📩 Message from Support Team")
     .setColor(0xFFA500)
     .setAuthor({ name: staffMessage.author.tag, iconURL: staffMessage.author.displayAvatarURL() })
     .setDescription(staffMessage.content || "*No text content*")
     .setTimestamp();
-  await user.send({ embeds: [embed] });
+
+  await user.send({ content: `<@${user.id}>`, embeds: [embed] });
 }
 
 // ---------- DM Handling ----------
 client.on(Events.MessageCreate, async message => {
   if (message.author.bot || message.guild) return;
 
-  // Check if user is blacklisted
   if (blacklisted.has(message.author.id)) return;
 
   let ticket = tickets.get(message.author.id);
@@ -143,7 +148,9 @@ client.on(Events.InteractionCreate, async interaction => {
         { name: "Opened At", value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
       )
       .setTimestamp();
-    await channel.send({ embeds: [ticketEmbed] });
+
+    const onCallRole = guild.roles.cache.find(r => r.name === ONCALL_ROLE_NAME);
+    await channel.send({ content: onCallRole ? `<@&${onCallRole.id}>` : "", embeds: [ticketEmbed] });
 
     await interaction.update({
       content: `✅ Your ticket for **${category}** has been created! Staff will assist you shortly: <#${channel.id}>`,
@@ -172,14 +179,14 @@ client.on(Events.MessageCreate, async message => {
   // ---------- On Call ----------
   if (member.roles.cache.has(STAFF_ROLE_ID)) {
     if (content === "!oncall") {
-      let role = message.guild.roles.cache.find(r => r.name === "On Call");
-      if (!role) role = await message.guild.roles.create({ name: "On Call", color: 0x00AE86, reason: "On-call role" });
+      let role = message.guild.roles.cache.find(r => r.name === ONCALL_ROLE_NAME);
+      if (!role) role = await message.guild.roles.create({ name: ONCALL_ROLE_NAME, color: 0x00AE86, reason: "On-call role" });
       if (member.roles.cache.has(role.id)) return message.reply("You are already On Call.");
       await member.roles.add(role);
       return message.reply("✅ You are now On Call!");
     }
     if (content === "!offcall") {
-      const role = message.guild.roles.cache.find(r => r.name === "On Call");
+      const role = message.guild.roles.cache.find(r => r.name === ONCALL_ROLE_NAME);
       if (!role || !member.roles.cache.has(role.id)) return message.reply("You are not currently On Call.");
       await member.roles.remove(role);
       return message.reply("✅ You are no longer On Call.");
@@ -239,6 +246,25 @@ client.on(Events.MessageCreate, async message => {
     }
     tickets.delete(ticket.userId);
     await message.channel.delete().catch(() => null);
+  }
+
+  // ---------- Say Command for Group Chairman ----------
+  if (content.startsWith("!say ")) {
+    const chairmanRole = message.guild.roles.cache.find(r => r.name === "Group Chairman");
+    if (!chairmanRole || !member.roles.cache.has(chairmanRole.id)) {
+      return message.reply("❌ You do not have permission to use this command.");
+    }
+
+    const sayText = message.content.slice(5).trim();
+    if (!sayText) return message.reply("⚠️ Please provide text to say.");
+
+    const embed = new EmbedBuilder()
+      .setColor(0x00AE86)
+      .setDescription(sayText)
+      .setFooter({ text: `Sent by ${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
+      .setTimestamp();
+
+    return message.channel.send({ embeds: [embed] });
   }
 });
 
