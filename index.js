@@ -12,10 +12,10 @@ const {
 
 // CONFIG
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const MODMAIL_CATEGORY_ID = process.env.MODMAIL_CATEGORY_ID; // Ticket category
-const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;           // Log channel
-const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;            // Main server
-const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;            // Staff role from env
+const MODMAIL_CATEGORY_ID = process.env.MODMAIL_CATEGORY_ID;
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;
+const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 
 // Create client
 const client = new Client({
@@ -36,7 +36,40 @@ client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// Handle DMs from users
+// ---------- Helper Functions ----------
+
+// Forward DM from user to staff as embed
+async function forwardUserMessage(ticket, userMessage) {
+  const staffChannel = await client.channels.fetch(ticket.channelId).catch(() => null);
+  if (!staffChannel) return;
+
+  const embed = new EmbedBuilder()
+    .setTitle("📩 New Message from User")
+    .setColor(0x00AE86)
+    .setAuthor({ name: userMessage.author.tag, iconURL: userMessage.author.displayAvatarURL() })
+    .setDescription(userMessage.content || "*No text content*")
+    .setTimestamp();
+
+  await staffChannel.send({ embeds: [embed] });
+}
+
+// Forward staff message to user as embed
+async function forwardStaffMessage(ticket, staffMessage) {
+  const user = await client.users.fetch(ticket.userId).catch(() => null);
+  if (!user) return;
+
+  const embed = new EmbedBuilder()
+    .setTitle("📩 Message from Support Team")
+    .setColor(0xFFA500)
+    .setAuthor({ name: staffMessage.author.tag, iconURL: staffMessage.author.displayAvatarURL() })
+    .setDescription(staffMessage.content || "*No text content*")
+    .setTimestamp();
+
+  await user.send({ embeds: [embed] });
+}
+
+// ---------- DM Handling ----------
+
 client.on(Events.MessageCreate, async message => {
   if (message.author.bot || message.guild) return;
 
@@ -52,37 +85,30 @@ client.on(Events.MessageCreate, async message => {
         { label: "Giveaway Win", value: "Giveaway Win" }
       ]);
     const row = new ActionRowBuilder().addComponents(categories);
+
     return message.channel.send({
       content: "Welcome! Please select a category for your ticket:",
       components: [row]
     });
   }
 
-  // Forward user messages to staff as embed
   if (ticket.confirmed) {
     ticket.lastActivity = Date.now();
-    const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
-    if (!channel) return;
-    const embed = new EmbedBuilder()
-      .setTitle("📩 New Message from User")
-      .setDescription(message.content || "*No text content*")
-      .setAuthor({ name: message.author.tag, iconURL: message.author.displayAvatarURL() })
-      .setColor(0x00AE86)
-      .setTimestamp();
-    await channel.send({ embeds: [embed] });
+    await forwardUserMessage(ticket, message);
   }
 });
 
-// Handle ticket category selection
+// ---------- Category Selection / Ticket Creation ----------
+
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (!interaction.isStringSelectMenu() || interaction.customId !== "ticket-category") return;
 
-    const selected = interaction.values[0];
+    const category = interaction.values[0];
     const guild = client.guilds.cache.get(MAIN_GUILD_ID);
     if (!guild) return interaction.update({ content: "Could not find main server.", components: [] });
 
-    // Create ticket channel with permissions
+    // Create ticket channel
     const channel = await guild.channels.create({
       name: `ticket-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
       type: ChannelType.GuildText,
@@ -96,113 +122,131 @@ client.on(Events.InteractionCreate, async interaction => {
 
     tickets.set(interaction.user.id, {
       userId: interaction.user.id,
-      category: selected,
+      category,
       confirmed: true,
       channelId: channel.id,
       lastActivity: Date.now(),
       warningSent: false
     });
 
-    // Fetch member info
     const member = await guild.members.fetch(interaction.user.id).catch(() => null);
     const rolesText = member
       ? member.roles.cache.filter(r => r.id !== guild.id).map(r => r.name).join(", ") || "N/A"
       : "N/A";
 
-    // Initial embed in ticket channel for staff
-    const welcomeEmbed = new EmbedBuilder()
-      .setTitle(`🎫 Ticket Opened by ${interaction.user.tag}`)
-      .setDescription(`A new ticket has been opened.`)
-      .addFields(
-        { name: "User ID", value: interaction.user.id, inline: true },
-        { name: "Roles", value: rolesText, inline: true },
-        { name: "Opened At", value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
-      )
+    const ticketEmbed = new EmbedBuilder()
+      .setTitle(`🎫 Ticket Opened`)
+      .setDescription(`New ticket created by <@${interaction.user.id}>`)
       .setColor(0x00AE86)
-      .setTimestamp();
-    await channel.send({ embeds: [welcomeEmbed] });
-
-    // Log ticket creation with @here ping
-    const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
-    const logEmbed = new EmbedBuilder()
-      .setTitle("📩 New Ticket Created")
       .addFields(
         { name: "User", value: interaction.user.tag, inline: true },
         { name: "User ID", value: interaction.user.id, inline: true },
-        { name: "Roles", value: rolesText },
-        { name: "Category", value: selected }
+        { name: "Roles", value: rolesText, inline: false },
+        { name: "Category", value: category, inline: true },
+        { name: "Opened At", value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
       )
+      .setTimestamp();
+    await channel.send({ embeds: [ticketEmbed] });
+
+    // Log with @here ping
+    const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
+    const logEmbed = new EmbedBuilder()
+      .setTitle("📩 New Ticket Created")
       .setColor(0x00AE86)
+      .setDescription(`Ticket for **${category}** opened by <@${interaction.user.id}>`)
+      .addFields(
+        { name: "User ID", value: interaction.user.id, inline: true },
+        { name: "Roles", value: rolesText, inline: true },
+        { name: "Channel", value: `<#${channel.id}>`, inline: true }
+      )
       .setTimestamp();
     await logChannel.send({ content: "@here", embeds: [logEmbed] });
 
     await interaction.update({
-      content: `Your ticket for **${selected}** has been created! Staff will assist you shortly: <#${channel.id}>`,
+      content: `✅ Your ticket for **${category}** has been created! Staff will assist you shortly: <#${channel.id}>`,
       components: []
     });
 
-  } catch (error) {
-    console.error("Interaction error:", error);
-    if (interaction.replied || interaction.deferred) {
-      interaction.followUp({ content: `Something went wrong: ${error.message}`, ephemeral: true }).catch(() => {});
-    } else {
-      interaction.reply({ content: `Something went wrong: ${error.message}`, ephemeral: true }).catch(() => {});
-    }
+  } catch (err) {
+    console.error(err);
+    if (!interaction.replied) interaction.reply({ content: "❌ Something went wrong.", ephemeral: true });
   }
 });
 
-// Handle staff messages
+// ---------- Staff & Ticket Commands ----------
+
 client.on(Events.MessageCreate, async message => {
   if (!message.guild || message.author.bot) return;
 
+  const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+  if (!member) return;
+
   const ticket = [...tickets.values()].find(t => t.channelId === message.channel.id);
-  if (!ticket) return;
-
-  ticket.lastActivity = Date.now();
-
-  // Forward staff messages to user as embed
-  if (!message.content.startsWith("!") && ticket) {
-    const user = await client.users.fetch(ticket.userId).catch(() => null);
-    if (!user) return;
-    const staffEmbed = new EmbedBuilder()
-      .setTitle("📩 Message from Staff")
-      .setDescription(message.content || "*No text content*")
-      .setAuthor({ name: message.author.tag, iconURL: message.author.displayAvatarURL() })
-      .setColor(0xFFA500)
-      .setTimestamp();
-    await user.send({ embeds: [staffEmbed] });
-  }
+  if (ticket) ticket.lastActivity = Date.now();
 
   const content = message.content.toLowerCase();
 
-  // Claim ticket
-  if (content === "!claim") {
+  // ---------- Ticket Forwarding ----------
+  if (ticket && !content.startsWith("!")) await forwardStaffMessage(ticket, message);
+
+  // ---------- Claim Ticket ----------
+  if (content === "!claim" && ticket) {
     const embed = new EmbedBuilder()
       .setTitle("✅ Ticket Claimed")
-      .setDescription("You have successfully connected with our support team.\n\nPlease provide a clear explanation of your issue.\n\n**Thank you!**")
-      .setColor(0x00AE86);
+      .setColor(0x00AE86)
+      .setDescription(`This ticket has been claimed by ${message.author.tag}. Please respond to the user.`);
     await message.channel.send({ embeds: [embed] });
   }
 
-  // Close ticket - only staff with role
-  if (content === "!close") {
-    const member = await message.guild.members.fetch(message.author.id).catch(() => null);
-    if (!member || !member.roles.cache.has(STAFF_ROLE_ID)) {
-      return message.reply("You do not have permission to close this ticket.");
-    }
+  // ---------- Close Ticket ----------
+  if (content === "!close" && ticket) {
+    if (!member.roles.cache.has(STAFF_ROLE_ID))
+      return message.reply("❌ You do not have permission to close this ticket.");
 
     const user = await client.users.fetch(ticket.userId).catch(() => null);
-    if (user) await user.send("Your ticket has been closed. Thank you!");
+    if (user) {
+      const closeEmbed = new EmbedBuilder()
+        .setTitle("❌ Ticket Closed")
+        .setColor(0xFF0000)
+        .setDescription("Your ticket has been closed by the support team. Thank you!");
+      await user.send({ embeds: [closeEmbed] });
+    }
 
     const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
-    logChannel.send(`❌ Ticket closed by ${message.author.tag} | Channel: ${message.channel.name}`);
+    const logEmbed = new EmbedBuilder()
+      .setTitle("❌ Ticket Closed")
+      .setColor(0xFF0000)
+      .setDescription(`Ticket closed by ${message.author.tag}`)
+      .addFields({ name: "Channel", value: `<#${message.channel.id}>` }, { name: "User ID", value: ticket.userId })
+      .setTimestamp();
+    await logChannel.send({ embeds: [logEmbed] });
 
     tickets.delete(ticket.userId);
     await message.channel.delete().catch(() => null);
   }
+
+  // ---------- On Call Commands (Staff Only) ----------
+  if (member.roles.cache.has(STAFF_ROLE_ID)) {
+    if (content === "!oncall") {
+      let role = message.guild.roles.cache.find(r => r.name === "On Call");
+      if (!role) {
+        role = await message.guild.roles.create({ name: "On Call", color: 0x00AE86, reason: "On-call role" });
+      }
+      if (member.roles.cache.has(role.id)) return message.reply("You are already On Call.");
+      await member.roles.add(role);
+      return message.reply("✅ You are now On Call!");
+    }
+
+    if (content === "!offcall") {
+      const role = message.guild.roles.cache.find(r => r.name === "On Call");
+      if (!role || !member.roles.cache.has(role.id)) return message.reply("You are not currently On Call.");
+      await member.roles.remove(role);
+      return message.reply("✅ You are no longer On Call.");
+    }
+  }
 });
 
-// Periodic inactivity check
+// ---------- Inactivity Check ----------
 setInterval(async () => {
   const now = Date.now();
   for (const [userId, ticket] of tickets) {
@@ -211,20 +255,27 @@ setInterval(async () => {
     if (!ticket.warningSent && inactiveTime >= 18 * 60 * 60 * 1000) {
       ticket.warningSent = true;
       const user = await client.users.fetch(ticket.userId).catch(() => null);
-      if (user) user.send(`Dear <@${user.id}>,\n\n6 hours from now your ticket will be automatically closed if no action is taken. Please respond to keep it open.`);
+      if (user) user.send(`⚠️ Dear <@${user.id}>, 6 hours from now your ticket will automatically close if no response is received.`);
     }
 
     if (inactiveTime >= 24 * 60 * 60 * 1000) {
       const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
       const user = await client.users.fetch(ticket.userId).catch(() => null);
 
-      if (user) await user.send("Your ticket has been closed due to inactivity. Thank you!");
-      if (channel) await channel.send("Ticket closed automatically due to 24 hours of inactivity.").catch(() => null);
-      if (channel) await channel.delete().catch(() => null);
+      if (user) {
+        const embed = new EmbedBuilder()
+          .setTitle("❌ Ticket Closed")
+          .setColor(0xFF0000)
+          .setDescription("Your ticket has been closed due to 24 hours of inactivity.");
+        await user.send({ embeds: [embed] });
+      }
 
+      if (channel) await channel.send("Ticket closed automatically due to inactivity.").catch(() => null);
+      if (channel) await channel.delete().catch(() => null);
       tickets.delete(userId);
     }
   }
-}, 60 * 60 * 1000);
+}, 60 * 60 * 1000); // every hour
 
+// ---------- Login ----------
 client.login(BOT_TOKEN);
