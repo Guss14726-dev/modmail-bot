@@ -39,7 +39,7 @@ client.once(Events.ClientReady, () => {
 // Handle DMs from users
 client.on(Events.MessageCreate, async message => {
   if (message.author.bot) return;
-  if (message.guild) return; // Only handle DMs here
+  if (message.guild) return; // Only handle DMs
 
   let ticket = tickets.get(message.author.id);
 
@@ -72,78 +72,88 @@ client.on(Events.MessageCreate, async message => {
 
 // Handle select menu and buttons
 client.on(Events.InteractionCreate, async interaction => {
-  // Ticket category selection
-  if (interaction.isStringSelectMenu() && interaction.customId === "ticket-category") {
-    const selected = interaction.values[0];
-    tickets.set(interaction.user.id, { userId: interaction.user.id, category: selected, confirmed: false });
+  try {
+    // Ticket category selection
+    if (interaction.isStringSelectMenu() && interaction.customId === "ticket-category") {
+      const selected = interaction.values[0];
+      tickets.set(interaction.user.id, { userId: interaction.user.id, category: selected, confirmed: false });
 
-    const yesButton = new ButtonBuilder().setCustomId("confirm-yes").setLabel("Yes").setStyle(ButtonStyle.Success);
-    const noButton = new ButtonBuilder().setCustomId("confirm-no").setLabel("No").setStyle(ButtonStyle.Danger);
-    const row = new ActionRowBuilder().addComponents(yesButton, noButton);
+      const yesButton = new ButtonBuilder().setCustomId("confirm-yes").setLabel("Yes").setStyle(ButtonStyle.Success);
+      const noButton = new ButtonBuilder().setCustomId("confirm-no").setLabel("No").setStyle(ButtonStyle.Danger);
+      const row = new ActionRowBuilder().addComponents(yesButton, noButton);
 
-    return interaction.update({
-      content: `You selected **${selected}**. Are you sure you want to open this ticket?`,
-      components: [row]
-    });
-  }
-
-  // Handle Yes/No buttons
-  if (interaction.isButton()) {
-    const ticket = tickets.get(interaction.user.id);
-    if (!ticket) return;
-
-    if (interaction.customId === "confirm-no") {
-      tickets.delete(interaction.user.id);
-      return interaction.update({ content: "Ticket creation canceled.", components: [] });
+      // Respond immediately to prevent "interaction failed"
+      await interaction.update({
+        content: `You selected **${selected}**. Are you sure you want to open this ticket?`,
+        components: [row]
+      });
     }
 
-    if (interaction.customId === "confirm-yes") {
-      ticket.confirmed = true;
+    // Handle Yes/No buttons
+    if (interaction.isButton()) {
+      const ticket = tickets.get(interaction.user.id);
+      if (!ticket) return;
 
-      // Fetch guild member info
-      const mainGuild = client.guilds.cache.get(MAIN_GUILD_ID);
-      let memberData = null;
-      if (mainGuild) {
-        const member = await mainGuild.members.fetch(interaction.user.id).catch(() => null);
-        if (member) {
-          memberData = {
-            id: member.id,
-            username: member.user.tag,
-            roles: member.roles.cache
-              .filter(role => role.id !== mainGuild.id)
-              .map(r => r.name)
-          };
-        }
+      if (interaction.customId === "confirm-no") {
+        tickets.delete(interaction.user.id);
+        return interaction.update({ content: "Ticket creation canceled.", components: [] });
       }
 
-      // Create thread in staff channel
-      const channel = await client.channels.fetch(MODMAIL_CHANNEL_ID);
-      const thread = await channel.threads.create({
-        name: `Ticket - ${interaction.user.username}`,
-        type: ChannelType.PrivateThread,
-        parent: MODMAIL_CHANNEL_ID
-      });
-      ticket.threadId = thread.id;
+      if (interaction.customId === "confirm-yes") {
+        ticket.confirmed = true;
 
-      // Send log to log channel
-      const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
-      const logEmbed = new EmbedBuilder()
-        .setTitle("📩 New Ticket Created")
-        .addFields(
-          { name: "User", value: interaction.user.tag, inline: true },
-          { name: "User ID", value: interaction.user.id, inline: true },
-          { name: "Roles", value: memberData?.roles.join(", ") || "N/A" },
-          { name: "Category", value: ticket.category }
-        )
-        .setColor(0x00AE86)
-        .setTimestamp();
-      logChannel.send({ embeds: [logEmbed] });
+        // Create thread in staff channel
+        const channel = await client.channels.fetch(MODMAIL_CHANNEL_ID);
+        const thread = await channel.threads.create({
+          name: `Ticket - ${interaction.user.username}`,
+          type: ChannelType.PrivateThread,
+          parent: MODMAIL_CHANNEL_ID
+        });
+        ticket.threadId = thread.id;
 
-      // Confirm to user
-      await interaction.update({
-        content: "Your ticket has been created! Staff will assist you shortly.",
-        components: []
-      });
+        // Fetch guild member info
+        const mainGuild = client.guilds.cache.get(MAIN_GUILD_ID);
+        let memberData = null;
+        if (mainGuild) {
+          const member = await mainGuild.members.fetch(interaction.user.id).catch(() => null);
+          if (member) {
+            memberData = {
+              id: member.id,
+              username: member.user.tag,
+              roles: member.roles.cache
+                .filter(role => role.id !== mainGuild.id)
+                .map(r => r.name)
+            };
+          }
+        }
+
+        // Log ticket creation in log channel with @here ping
+        const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
+        const logEmbed = new EmbedBuilder()
+          .setTitle("📩 New Ticket Created")
+          .addFields(
+            { name: "User", value: interaction.user.tag, inline: true },
+            { name: "User ID", value: interaction.user.id, inline: true },
+            { name: "Roles", value: memberData?.roles.join(", ") || "N/A" },
+            { name: "Category", value: ticket.category }
+          )
+          .setColor(0x00AE86)
+          .setTimestamp();
+        await logChannel.send({ content: "@here", embeds: [logEmbed] });
+
+        // Confirm to user
+        await interaction.update({
+          content: "Your ticket has been created! Staff will assist you shortly.",
+          components: []
+        });
+      }
+    }
+  } catch (error) {
+    console.error("Interaction error:", error);
+    if (interaction.replied || interaction.deferred) {
+      interaction.followUp({ content: "Something went wrong. Please try again.", ephemeral: true }).catch(() => {});
+    } else {
+      interaction.reply({ content: "Something went wrong. Please try again.", ephemeral: true }).catch(() => {});
     }
   }
 });
