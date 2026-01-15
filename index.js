@@ -34,14 +34,19 @@ const client = new Client({
 const tickets = new Map();
 const blacklisted = new Set();
 
-/* -------------------- READY -------------------- */
+// -------------------- TICKET QUOTA TRACKING --------------------
+const weeklyClaims = new Map(); // userId => tickets claimed this week
+const twoWeekClaims = new Map(); // userId => [week1, week2]
+const MANAGER_USER_ID = "1124685735384072213"; // Your Discord ID for approval
+
+// -------------------- READY --------------------
 client.once(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await client.user.setActivity("For Tickets", { type: "Listening" });
   await client.user.setStatus("idle");
 });
 
-/* -------------------- HELPERS -------------------- */
+// -------------------- HELPERS --------------------
 function getFirstImage(message) {
   const a = message.attachments?.first();
   if (!a) return null;
@@ -70,7 +75,7 @@ async function closeTicket(ticket, reason) {
   tickets.delete(ticket.userId);
 }
 
-/* -------------------- FORWARDING -------------------- */
+// -------------------- FORWARDING --------------------
 async function forwardUserMessage(ticket, msg) {
   const ch = await client.channels.fetch(ticket.channelId).catch(() => null);
   if (!ch) return;
@@ -105,7 +110,7 @@ async function forwardStaffMessage(ticket, msg) {
   await user.send({ embeds: [embed] }).catch(() => {});
 }
 
-/* -------------------- DM HANDLING -------------------- */
+// -------------------- DM HANDLING --------------------
 client.on(Events.MessageCreate, async msg => {
   if (msg.author.bot || msg.guild) return;
   if (blacklisted.has(msg.author.id)) return;
@@ -131,7 +136,7 @@ client.on(Events.MessageCreate, async msg => {
   await forwardUserMessage(ticket, msg);
 });
 
-/* -------------------- TICKET CREATION -------------------- */
+// -------------------- TICKET CREATION --------------------
 client.on(Events.InteractionCreate, async i => {
   if (!i.isStringSelectMenu() || i.customId !== "ticket-category") return;
   if (blacklisted.has(i.user.id))
@@ -170,7 +175,43 @@ client.on(Events.InteractionCreate, async i => {
   await i.update({ content: `✅ Ticket created: <#${channel.id}>`, components: [] });
 });
 
-/* -------------------- COMMANDS -------------------- */
+// -------------------- QUOTA APPROVAL FUNCTION --------------------
+async function sendQuotaApproval(user, type) {
+  const manager = await client.users.fetch(MANAGER_USER_ID).catch(() => null);
+  if (!manager) return;
+
+  const draftEmbed = new EmbedBuilder()
+    .setTitle("📌 Ticket Quota Notification (Draft)")
+    .setDescription(
+      `Dear User,\n\nYou have not completed your ticket quota ${type}. ` +
+      `If you believe this is a mistake, please either DM Gus14726 or reach out for support.`
+    )
+    .setColor(0xFFA500)
+    .setFooter({ text: "Approve with ✅ or ❌" })
+    .setTimestamp();
+
+  const approvalMessage = await manager.send({
+    content: `Send ${type} ticket quota DM to <@${user.id}>?`,
+    embeds: [draftEmbed]
+  });
+
+  await approvalMessage.react("✅");
+  await approvalMessage.react("❌");
+
+  const filter = (reaction, u) => ["✅", "❌"].includes(reaction.emoji.name) && u.id === MANAGER_USER_ID;
+  const collector = approvalMessage.createReactionCollector({ filter, max: 1, time: 60 * 60 * 1000 });
+
+  collector.on("collect", async r => {
+    if (r.emoji.name === "✅") {
+      await user.send({ embeds: [draftEmbed] }).catch(() => {});
+      await manager.send(`✅ Sent ${type} ticket quota DM to <@${user.id}>`);
+    } else {
+      await manager.send(`❌ Did NOT send ${type} ticket quota DM to <@${user.id}>`);
+    }
+  });
+}
+
+// -------------------- COMMANDS --------------------
 client.on(Events.MessageCreate, async msg => {
   if (!msg.guild || msg.author.bot) return;
 
@@ -248,6 +289,16 @@ client.on(Events.MessageCreate, async msg => {
     if (ticket.claimed) return msg.reply("Already claimed.");
     ticket.claimed = true;
     ticket.claimedBy = msg.author.id;
+
+    // Update weekly claims
+    const userClaims = weeklyClaims.get(msg.author.id) || 0;
+    weeklyClaims.set(msg.author.id, userClaims + 1);
+
+    // Update 2-week tracker
+    const userTwoWeeks = twoWeekClaims.get(msg.author.id) || [0, 0];
+    userTwoWeeks[userTwoWeeks.length - 1] += 1;
+    twoWeekClaims.set(msg.author.id, userTwoWeeks);
+
     return msg.reply("✅ Ticket claimed.");
   }
 
@@ -259,6 +310,32 @@ client.on(Events.MessageCreate, async msg => {
     return;
   }
 
+  // !ticketquota manual
+  if (content.startsWith("!ticketquota")) {
+    if (!member.roles.cache.has(STAFF_ROLE_ID))
+      return msg.reply("❌ You do not have permission to use this command.");
+
+    const args = msg.content.split(" ");
+    const userId = args[1]?.replace(/[<@!>]/g, "");
+    if (!userId) return msg.reply("Usage: !ticketquota @user");
+
+    const user = await client.users.fetch(userId).catch(() => null);
+    if (!user) return msg.reply("User not found.");
+
+    const embed = new EmbedBuilder()
+      .setTitle("📌 Ticket Quota Notification")
+      .setDescription(
+        "Dear User,\n\nYou have not completed your ticket quota. " +
+        "If you believe this is a mistake, please either DM Gus14726 or reach out for support."
+      )
+      .setColor(0xFFA500)
+      .setFooter({ text: "Yours sincerely" })
+      .setTimestamp();
+
+    await user.send({ embeds: [embed] }).catch(() => {});
+    return msg.reply(`✅ Ticket quota notification sent to <@${user.id}>.`);
+  }
+
   // forward staff message
   if (!content.startsWith("!")) {
     ticket.lastActivity = Date.now();
@@ -266,7 +343,7 @@ client.on(Events.MessageCreate, async msg => {
   }
 });
 
-/* -------------------- AUTO CLOSE -------------------- */
+// -------------------- AUTO CLOSE --------------------
 setInterval(async () => {
   const now = Date.now();
   for (const ticket of tickets.values()) {
@@ -276,5 +353,25 @@ setInterval(async () => {
   }
 }, 60 * 60 * 1000);
 
-/* -------------------- LOGIN -------------------- */
+// -------------------- AUTOMATIC QUOTA CHECK --------------------
+setInterval(async () => {
+  for (const [userId, weekly] of weeklyClaims.entries()) {
+    const user = await client.users.fetch(userId).catch(() => null);
+    if (!user) continue;
+
+    if (weekly < 3) await sendQuotaApproval(user, "this week");
+
+    const twoWeeks = twoWeekClaims.get(userId) || [0, 0];
+    if (twoWeeks[0] === 0 && twoWeeks[1] === 0)
+      await sendQuotaApproval(user, "in the last 2 weeks");
+  }
+
+  // Shift weeks
+  for (const [userId, twoWeeks] of twoWeekClaims.entries())
+    twoWeekClaims.set(userId, [twoWeeks[1], 0]);
+
+  weeklyClaims.clear();
+}, 24 * 60 * 60 * 1000);
+
+// -------------------- LOGIN --------------------
 client.login(BOT_TOKEN);
