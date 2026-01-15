@@ -219,7 +219,36 @@ client.on(Events.MessageCreate, async msg => {
   const member = await msg.guild.members.fetch(msg.author.id).catch(() => null);
   if (!member) return;
 
+  // -------------------- MANUAL !TICKETQUOTA --------------------
+  if (content.startsWith("!ticketquota")) {
+    if (!member.roles.cache.has(STAFF_ROLE_ID))
+      return msg.reply("❌ You do not have permission to use this command.");
+
+    const args = msg.content.split(" ");
+    const userId = args[1]?.replace(/[<@!>]/g, "");
+    if (!userId) return msg.reply("Usage: !ticketquota @user");
+
+    const user = await client.users.fetch(userId).catch(() => null);
+    if (!user) return msg.reply("User not found.");
+
+    const embed = new EmbedBuilder()
+      .setTitle("📌 Ticket Quota Notification")
+      .setDescription(
+        "Dear User,\n\nYou have not completed your ticket quota. " +
+        "If you believe this is a mistake, please either DM Gus14726 or reach out for support."
+      )
+      .setColor(0xFFA500)
+      .setFooter({ text: "Yours sincerely" })
+      .setTimestamp();
+
+    await user.send({ embeds: [embed] }).catch(() => {});
+    return msg.reply(`✅ Ticket quota notification sent to <@${user.id}>.`);
+  }
+
+  // -------------------- TICKET-RELATED COMMANDS --------------------
   const ticket = [...tickets.values()].find(t => t.channelId === msg.channel.id);
+
+  if (!ticket) return;
 
   // !cmds
   if (content === "!cmds") {
@@ -272,106 +301,4 @@ client.on(Events.MessageCreate, async msg => {
     const user = await client.users.fetch(userId).catch(() => null);
     if (!user) return msg.reply("User not found.");
 
-    await user.send(text).catch(() => {});
-    return msg.reply("✅ DM sent.");
-  }
-
-  if (!ticket) return;
-
-  // !test
-  if (content === "!test") {
-    await closeTicket(ticket, "Closed via !test (auto-close simulation).");
-    return;
-  }
-
-  // !claim
-  if (content === "!claim") {
-    if (ticket.claimed) return msg.reply("Already claimed.");
-    ticket.claimed = true;
-    ticket.claimedBy = msg.author.id;
-
-    // Update weekly claims
-    const userClaims = weeklyClaims.get(msg.author.id) || 0;
-    weeklyClaims.set(msg.author.id, userClaims + 1);
-
-    // Update 2-week tracker
-    const userTwoWeeks = twoWeekClaims.get(msg.author.id) || [0, 0];
-    userTwoWeeks[userTwoWeeks.length - 1] += 1;
-    twoWeekClaims.set(msg.author.id, userTwoWeeks);
-
-    return msg.reply("✅ Ticket claimed.");
-  }
-
-  if (!ticket.claimed) return msg.reply("Claim the ticket first.");
-
-  // !close
-  if (content === "!close") {
-    await closeTicket(ticket, "Closed by staff.");
-    return;
-  }
-
-  // !ticketquota manual
-  if (content.startsWith("!ticketquota")) {
-    if (!member.roles.cache.has(STAFF_ROLE_ID))
-      return msg.reply("❌ You do not have permission to use this command.");
-
-    const args = msg.content.split(" ");
-    const userId = args[1]?.replace(/[<@!>]/g, "");
-    if (!userId) return msg.reply("Usage: !ticketquota @user");
-
-    const user = await client.users.fetch(userId).catch(() => null);
-    if (!user) return msg.reply("User not found.");
-
-    const embed = new EmbedBuilder()
-      .setTitle("📌 Ticket Quota Notification")
-      .setDescription(
-        "Dear User,\n\nYou have not completed your ticket quota. " +
-        "If you believe this is a mistake, please either DM Gus14726 or reach out for support."
-      )
-      .setColor(0xFFA500)
-      .setFooter({ text: "Yours sincerely" })
-      .setTimestamp();
-
-    await user.send({ embeds: [embed] }).catch(() => {});
-    return msg.reply(`✅ Ticket quota notification sent to <@${user.id}>.`);
-  }
-
-  // forward staff message
-  if (!content.startsWith("!")) {
-    ticket.lastActivity = Date.now();
-    await forwardStaffMessage(ticket, msg);
-  }
-});
-
-// -------------------- AUTO CLOSE --------------------
-setInterval(async () => {
-  const now = Date.now();
-  for (const ticket of tickets.values()) {
-    if (now - ticket.lastActivity >= 24 * 60 * 60 * 1000) {
-      await closeTicket(ticket, "Closed due to inactivity.");
-    }
-  }
-}, 60 * 60 * 1000);
-
-// -------------------- AUTOMATIC QUOTA CHECK --------------------
-setInterval(async () => {
-  for (const [userId, weekly] of weeklyClaims.entries()) {
-    const user = await client.users.fetch(userId).catch(() => null);
-    if (!user) continue;
-
-    if (weekly < 3) await sendQuotaApproval(user, "this week");
-
-    const twoWeeks = twoWeekClaims.get(userId) || [0, 0];
-    if (twoWeeks[0] === 0 && twoWeeks[1] === 0)
-      await sendQuotaApproval(user, "in the last 2 weeks");
-  }
-
-  // Shift weeks
-  for (const [userId, twoWeeks] of twoWeekClaims.entries())
-    twoWeekClaims.set(userId, [twoWeeks[1], 0]);
-
-  weeklyClaims.clear();
-}, 24 * 60 * 60 * 1000);
-
-// -------------------- LOGIN --------------------
-client.login(BOT_TOKEN);
+    await user.send(text).catch(()
