@@ -34,13 +34,14 @@ const client = new Client({
 const tickets = new Map();
 const blacklisted = new Set();
 
+/* -------------------- READY -------------------- */
 client.once(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await client.user.setActivity("For Tickets", { type: "Listening" });
   await client.user.setStatus("idle");
 });
 
-// IMAGE HELPER
+/* -------------------- HELPERS -------------------- */
 function getFirstImage(message) {
   const a = message.attachments?.first();
   if (!a) return null;
@@ -50,7 +51,26 @@ function getFirstImage(message) {
   return null;
 }
 
-// FORWARD USER → STAFF
+async function closeTicket(ticket, reason) {
+  const user = await client.users.fetch(ticket.userId).catch(() => null);
+  const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
+
+  if (user) {
+    await user.send({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle("❌ Ticket Closed")
+          .setDescription(reason)
+          .setColor(0xFF0000)
+      ]
+    }).catch(() => {});
+  }
+
+  if (channel) await channel.delete().catch(() => {});
+  tickets.delete(ticket.userId);
+}
+
+/* -------------------- FORWARDING -------------------- */
 async function forwardUserMessage(ticket, msg) {
   const ch = await client.channels.fetch(ticket.channelId).catch(() => null);
   if (!ch) return;
@@ -65,17 +85,9 @@ async function forwardUserMessage(ticket, msg) {
   const img = getFirstImage(msg);
   if (img) embed.setImage(img);
 
-  let ping = "";
-  if (!ticket.notifiedOnCall) {
-    const role = ch.guild.roles.cache.find(r => r.name === ONCALL_ROLE_NAME);
-    if (role) ping = `<@&${role.id}>`;
-    ticket.notifiedOnCall = true;
-  }
-
-  await ch.send({ content: ping, embeds: [embed] });
+  await ch.send({ embeds: [embed] });
 }
 
-// FORWARD STAFF → USER
 async function forwardStaffMessage(ticket, msg) {
   const user = await client.users.fetch(ticket.userId).catch(() => null);
   if (!user) return;
@@ -90,10 +102,10 @@ async function forwardStaffMessage(ticket, msg) {
   const img = getFirstImage(msg);
   if (img) embed.setImage(img);
 
-  await user.send({ embeds: [embed] });
+  await user.send({ embeds: [embed] }).catch(() => {});
 }
 
-// DM HANDLING
+/* -------------------- DM HANDLING -------------------- */
 client.on(Events.MessageCreate, async msg => {
   if (msg.author.bot || msg.guild) return;
   if (blacklisted.has(msg.author.id)) return;
@@ -119,7 +131,7 @@ client.on(Events.MessageCreate, async msg => {
   await forwardUserMessage(ticket, msg);
 });
 
-// TICKET CREATION
+/* -------------------- TICKET CREATION -------------------- */
 client.on(Events.InteractionCreate, async i => {
   if (!i.isStringSelectMenu() || i.customId !== "ticket-category") return;
   if (blacklisted.has(i.user.id))
@@ -143,9 +155,7 @@ client.on(Events.InteractionCreate, async i => {
     channelId: channel.id,
     lastActivity: Date.now(),
     claimed: false,
-    claimedBy: null,
-    notifiedOnCall: false,
-    warningSent: false
+    claimedBy: null
   });
 
   await channel.send({
@@ -160,7 +170,7 @@ client.on(Events.InteractionCreate, async i => {
   await i.update({ content: `✅ Ticket created: <#${channel.id}>`, components: [] });
 });
 
-// COMMANDS
+/* -------------------- COMMANDS -------------------- */
 client.on(Events.MessageCreate, async msg => {
   if (!msg.guild || msg.author.bot) return;
 
@@ -170,7 +180,7 @@ client.on(Events.MessageCreate, async msg => {
 
   const ticket = [...tickets.values()].find(t => t.channelId === msg.channel.id);
 
-  // !cmds (any case)
+  // !cmds
   if (content === "!cmds") {
     return msg.reply({
       embeds: [
@@ -179,11 +189,8 @@ client.on(Events.MessageCreate, async msg => {
           .setColor(0x00AE86)
           .addFields(
             { name: "General", value: "`!pong`" },
-            {
-              name: "Staff",
-              value: "`!oncall`\n`!offcall`\n`!claim`\n`!close`\n`!b <user>`\n`!un <user>`"
-            },
-            { name: "Restricted", value: "`!say <text>` (Group Chairman)" }
+            { name: "Staff", value: "`!claim`\n`!close`\n`!test`\n`!dm <user> <msg>`" },
+            { name: "Restricted", value: "`!say <msg>` (Group Chairman)" }
           )
       ]
     });
@@ -191,25 +198,21 @@ client.on(Events.MessageCreate, async msg => {
 
   if (content === "!pong") return msg.reply("🏓 Pong!");
 
-  // !say (Group Chairman ONLY)
+  // !say
   if (content.startsWith("!say ")) {
     const role = msg.guild.roles.cache.find(r => r.name === CHAIRMAN_ROLE_NAME);
-    if (!role || !member.roles.cache.has(role.id)) {
+    if (!role || !member.roles.cache.has(role.id))
       return msg.reply("❌ No permission.");
-    }
 
     const text = msg.content.slice(5).trim();
-    if (!text) return msg.reply("⚠️ Provide text.");
+    if (!text) return;
 
     return msg.channel.send({
       embeds: [
         new EmbedBuilder()
           .setDescription(text)
           .setColor(0x00AE86)
-          .setFooter({
-            text: msg.author.tag,
-            iconURL: msg.author.displayAvatarURL()
-          })
+          .setFooter({ text: msg.author.tag, iconURL: msg.author.displayAvatarURL() })
           .setTimestamp()
       ]
     });
@@ -217,31 +220,61 @@ client.on(Events.MessageCreate, async msg => {
 
   // STAFF ONLY BELOW
   if (!member.roles.cache.has(STAFF_ROLE_ID)) return;
-  if (!ticket) return;
 
-  // Claim
-  if (content === "!claim") {
-    if (ticket.claimed) return msg.reply("❌ Already claimed.");
-    ticket.claimed = true;
-    ticket.claimedBy = msg.author.id;
-    return msg.channel.send("✅ Ticket claimed.");
+  // !dm
+  if (content.startsWith("!dm ")) {
+    const args = msg.content.split(" ");
+    const userId = args[1]?.replace(/[<@!>]/g, "");
+    const text = args.slice(2).join(" ");
+    if (!userId || !text) return msg.reply("Usage: !dm @user message");
+
+    const user = await client.users.fetch(userId).catch(() => null);
+    if (!user) return msg.reply("User not found.");
+
+    await user.send(text).catch(() => {});
+    return msg.reply("✅ DM sent.");
   }
 
-  if (!ticket.claimed) return msg.reply("⚠️ Claim the ticket first.");
+  if (!ticket) return;
 
-  // Close
-  if (content === "!close") {
-    tickets.delete(ticket.userId);
-    await msg.channel.delete().catch(() => {});
+  // !test
+  if (content === "!test") {
+    await closeTicket(ticket, "Closed via !test (auto-close simulation).");
     return;
   }
 
-  // Forward staff message
+  // !claim
+  if (content === "!claim") {
+    if (ticket.claimed) return msg.reply("Already claimed.");
+    ticket.claimed = true;
+    ticket.claimedBy = msg.author.id;
+    return msg.reply("✅ Ticket claimed.");
+  }
+
+  if (!ticket.claimed) return msg.reply("Claim the ticket first.");
+
+  // !close
+  if (content === "!close") {
+    await closeTicket(ticket, "Closed by staff.");
+    return;
+  }
+
+  // forward staff message
   if (!content.startsWith("!")) {
     ticket.lastActivity = Date.now();
     await forwardStaffMessage(ticket, msg);
   }
 });
 
-// LOGIN
+/* -------------------- AUTO CLOSE -------------------- */
+setInterval(async () => {
+  const now = Date.now();
+  for (const ticket of tickets.values()) {
+    if (now - ticket.lastActivity >= 24 * 60 * 60 * 1000) {
+      await closeTicket(ticket, "Closed due to inactivity.");
+    }
+  }
+}, 60 * 60 * 1000);
+
+/* -------------------- LOGIN -------------------- */
 client.login(BOT_TOKEN);
