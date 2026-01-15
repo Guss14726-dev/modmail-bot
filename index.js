@@ -16,6 +16,7 @@ const MODMAIL_CATEGORY_ID = process.env.MODMAIL_CATEGORY_ID;
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 const CHAIRMAN_ROLE_NAME = "Group Chairman";
+const MANAGER_USER_ID = "1124685735384072213"; // your ID for DM approval
 
 // CLIENT
 const client = new Client({
@@ -24,9 +25,11 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.DirectMessageReactions
   ],
-  partials: [Partials.Channel, Partials.Message, Partials.User, Partials.GuildMember]
+  partials: [Partials.Message, Partials.Channel, Partials.User, Partials.Reaction]
 });
 
 // DATA
@@ -34,7 +37,6 @@ const tickets = new Map();
 const blacklisted = new Set();
 const weeklyClaims = new Map(); // userId => tickets claimed this week
 const twoWeekClaims = new Map(); // userId => [week1, week2]
-const MANAGER_USER_ID = "1124685735384072213"; // your ID for approval
 
 // HELPERS
 function getFirstImage(message) {
@@ -48,7 +50,9 @@ async function closeTicket(ticket, reason) {
   const user = await client.users.fetch(ticket.userId).catch(() => null);
   const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
   if (user) {
-    await user.send({ embeds: [new EmbedBuilder().setTitle("❌ Ticket Closed").setDescription(reason).setColor(0xFF0000)] }).catch(() => {});
+    await user.send({
+      embeds: [new EmbedBuilder().setTitle("❌ Ticket Closed").setDescription(reason).setColor(0xFF0000)]
+    }).catch(() => {});
   }
   if (channel) await channel.delete().catch(() => {});
   tickets.delete(ticket.userId);
@@ -82,23 +86,31 @@ async function forwardStaffMessage(ticket, msg) {
   await user.send({ embeds: [embed] }).catch(() => {});
 }
 
-// QUOTA APPROVAL
+// -------------------- QUOTA APPROVAL DM --------------------
 async function sendQuotaApproval(user, type) {
   const manager = await client.users.fetch(MANAGER_USER_ID).catch(() => null);
   if (!manager) return;
+
   const draftEmbed = new EmbedBuilder()
     .setTitle("📌 Ticket Quota Notification (Draft)")
     .setDescription(`Dear User,\n\nYou have not completed your ticket quota ${type}. If you think this is a mistake, DM Gus14726 or reach out for support.`)
     .setColor(0xFFA500)
-    .setFooter({ text: "Approve with ✅ or ❌" })
+    .setFooter({ text: "React ✅ to send or ❌ to cancel" })
     .setTimestamp();
-  const approvalMessage = await manager.send({ content: `Send ${type} ticket quota DM to <@${user.id}>?`, embeds: [draftEmbed] });
+
+  const approvalMessage = await manager.send({ embeds: [draftEmbed] }).catch(() => null);
+  if (!approvalMessage) return console.log("Cannot DM manager.");
+
   await approvalMessage.react("✅");
   await approvalMessage.react("❌");
-  const filter = (reaction, u) => ["✅", "❌"].includes(reaction.emoji.name) && u.id === MANAGER_USER_ID;
-  const collector = approvalMessage.createReactionCollector({ filter, max: 1, time: 60 * 60 * 1000 });
-  collector.on("collect", async r => {
-    if (r.emoji.name === "✅") {
+
+  const filter = (reaction, userReacting) =>
+    ["✅", "❌"].includes(reaction.emoji.name) && userReacting.id === MANAGER_USER_ID;
+
+  const collector = approvalMessage.createReactionCollector({ filter, max: 1, time: 15 * 60 * 1000 });
+
+  collector.on("collect", async (reaction) => {
+    if (reaction.emoji.name === "✅") {
       await user.send({ embeds: [draftEmbed] }).catch(() => {});
       await manager.send(`✅ Sent ${type} ticket quota DM to <@${user.id}>`);
     } else {
@@ -120,6 +132,7 @@ client.on(Events.InteractionCreate, async i => {
   if (blacklisted.has(i.user.id)) return i.update({ content: "❌ You cannot open tickets.", components: [] });
   const guild = client.guilds.cache.get(MAIN_GUILD_ID);
   if (!guild) return;
+
   const channel = await guild.channels.create({
     name: `ticket-${i.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
     type: ChannelType.GuildText,
@@ -129,19 +142,20 @@ client.on(Events.InteractionCreate, async i => {
       { id: STAFF_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
     ]
   });
+
   tickets.set(i.user.id, { userId: i.user.id, channelId: channel.id, lastActivity: Date.now(), claimed: false, claimedBy: null });
   await channel.send({ embeds: [new EmbedBuilder().setTitle("🎫 Ticket Opened").setDescription(`Opened by <@${i.user.id}>`).setColor(0x00AE86)] });
   await i.update({ content: `✅ Ticket created: <#${channel.id}>`, components: [] });
 });
 
-// -------------------- MESSAGE HANDLER (ALL COMMANDS) --------------------
+// -------------------- MESSAGE HANDLER --------------------
 client.on(Events.MessageCreate, async msg => {
   if (!msg.guild || msg.author.bot) return;
   const content = msg.content.toLowerCase();
   const member = await msg.guild.members.fetch(msg.author.id).catch(() => null);
   if (!member) return;
 
-  // -------------------- MANUAL !TICKETQUOTA --------------------
+  // MANUAL !TICKETQUOTA
   if (content.startsWith("!ticketquota")) {
     if (!member.roles.cache.has(STAFF_ROLE_ID)) return msg.reply("❌ No permission.");
     const args = msg.content.split(" ");
@@ -159,9 +173,9 @@ client.on(Events.MessageCreate, async msg => {
     return msg.reply(`✅ Ticket quota notification sent to <@${user.id}>.`);
   }
 
-  // -------------------- TICKET-RELATED COMMANDS --------------------
+  // TICKET CHANNEL COMMANDS
   const ticket = [...tickets.values()].find(t => t.channelId === msg.channel.id);
-  if (!ticket) return; // not a ticket channel, ignore
+  if (!ticket) return;
 
   // !claim
   if (content === "!claim") {
@@ -192,9 +206,7 @@ client.on(Events.MessageCreate, async msg => {
 setInterval(async () => {
   const now = Date.now();
   for (const ticket of tickets.values()) {
-    if (now - ticket.lastActivity >= 24 * 60 * 60 * 1000) {
-      await closeTicket(ticket, "Closed due to inactivity.");
-    }
+    if (now - ticket.lastActivity >= 24 * 60 * 60 * 1000) await closeTicket(ticket, "Closed due to inactivity.");
   }
 }, 60 * 60 * 1000);
 
