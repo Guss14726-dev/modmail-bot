@@ -16,6 +16,7 @@ const MODMAIL_CATEGORY_ID = process.env.MODMAIL_CATEGORY_ID;
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 const ONCALL_ROLE_NAME = "On Call";
+const CHAIRMAN_ROLE_NAME = "Group Chairman";
 
 // CLIENT
 const client = new Client({
@@ -159,15 +160,17 @@ client.on(Events.InteractionCreate, async i => {
   await i.update({ content: `✅ Ticket created: <#${channel.id}>`, components: [] });
 });
 
-// STAFF COMMANDS
+// COMMANDS
 client.on(Events.MessageCreate, async msg => {
   if (!msg.guild || msg.author.bot) return;
 
   const content = msg.content.toLowerCase();
-  const member = await msg.guild.members.fetch(msg.author.id);
+  const member = await msg.guild.members.fetch(msg.author.id).catch(() => null);
+  if (!member) return;
+
   const ticket = [...tickets.values()].find(t => t.channelId === msg.channel.id);
 
-  // !cmds (case-insensitive)
+  // !cmds (any case)
   if (content === "!cmds") {
     return msg.reply({
       embeds: [
@@ -188,9 +191,35 @@ client.on(Events.MessageCreate, async msg => {
 
   if (content === "!pong") return msg.reply("🏓 Pong!");
 
+  // !say (Group Chairman ONLY)
+  if (content.startsWith("!say ")) {
+    const role = msg.guild.roles.cache.find(r => r.name === CHAIRMAN_ROLE_NAME);
+    if (!role || !member.roles.cache.has(role.id)) {
+      return msg.reply("❌ No permission.");
+    }
+
+    const text = msg.content.slice(5).trim();
+    if (!text) return msg.reply("⚠️ Provide text.");
+
+    return msg.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setDescription(text)
+          .setColor(0x00AE86)
+          .setFooter({
+            text: msg.author.tag,
+            iconURL: msg.author.displayAvatarURL()
+          })
+          .setTimestamp()
+      ]
+    });
+  }
+
+  // STAFF ONLY BELOW
   if (!member.roles.cache.has(STAFF_ROLE_ID)) return;
   if (!ticket) return;
 
+  // Claim
   if (content === "!claim") {
     if (ticket.claimed) return msg.reply("❌ Already claimed.");
     ticket.claimed = true;
@@ -200,11 +229,14 @@ client.on(Events.MessageCreate, async msg => {
 
   if (!ticket.claimed) return msg.reply("⚠️ Claim the ticket first.");
 
+  // Close
   if (content === "!close") {
     tickets.delete(ticket.userId);
     await msg.channel.delete().catch(() => {});
+    return;
   }
 
+  // Forward staff message
   if (!content.startsWith("!")) {
     ticket.lastActivity = Date.now();
     await forwardStaffMessage(ticket, msg);
