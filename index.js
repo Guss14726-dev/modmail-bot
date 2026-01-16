@@ -14,7 +14,6 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const MODMAIL_CATEGORY_ID = process.env.MODMAIL_CATEGORY_ID;
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
-const MANAGER_USER_ID = "1124685735384072213"; // Manager ID
 
 // CLIENT
 const client = new Client({
@@ -29,9 +28,7 @@ const client = new Client({
 });
 
 // DATA
-const tickets = new Map();         // userId -> ticket
-const weeklyClaims = new Map();    // staffId -> number
-const twoWeekClaims = new Map();   // staffId -> [lastWeek, thisWeek]
+const tickets = new Map(); // userId -> ticket
 
 // -------------------- HELPERS --------------------
 function getFirstImage(msg) {
@@ -66,14 +63,16 @@ client.once(Events.ClientReady, () => {
   client.user.setStatus("idle");
 });
 
-// -------------------- DM HANDLER --------------------
+// -------------------- MESSAGE HANDLER --------------------
 client.on(Events.MessageCreate, async (msg) => {
   if (msg.author.bot) return;
 
-  // Handle user DMs
+  // -------------------- DM HANDLER --------------------
   if (!msg.guild) {
     let ticket = tickets.get(msg.author.id);
-    const guild = client.guilds.cache.get(MAIN_GUILD_ID);
+
+    // Fetch the guild properly
+    const guild = await client.guilds.fetch(MAIN_GUILD_ID).catch(() => null);
     if (!guild) return;
 
     // Auto-create ticket if it doesn't exist
@@ -89,7 +88,14 @@ client.on(Events.MessageCreate, async (msg) => {
         ]
       });
 
-      ticket = { userId: msg.author.id, channelId: channel.id, lastActivity: Date.now(), claimed: false, claimedBy: null };
+      ticket = {
+        userId: msg.author.id,
+        channelId: channel.id,
+        lastActivity: Date.now(),
+        claimed: false,
+        claimedBy: null
+      };
+
       tickets.set(msg.author.id, ticket);
 
       await channel.send({
@@ -118,7 +124,6 @@ client.on(Events.MessageCreate, async (msg) => {
 
     ticket.lastActivity = Date.now();
     await channel.send({ embeds: [embed] });
-
     return;
   }
 
@@ -136,12 +141,6 @@ client.on(Events.MessageCreate, async (msg) => {
     if (ticket.claimed) return msg.reply("❌ Already claimed.");
     ticket.claimed = true;
     ticket.claimedBy = msg.author.id;
-
-    weeklyClaims.set(msg.author.id, (weeklyClaims.get(msg.author.id) || 0) + 1);
-    const twoWeeks = twoWeekClaims.get(msg.author.id) || [0, 0];
-    twoWeeks[1]++;
-    twoWeekClaims.set(msg.author.id, twoWeeks);
-
     return msg.reply("✅ Ticket claimed.");
   }
 
