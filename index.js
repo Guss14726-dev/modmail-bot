@@ -9,12 +9,14 @@ const {
   ActivityType
 } = require("discord.js");
 
+// CONFIG
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MODMAIL_CATEGORY_ID = process.env.MODMAIL_CATEGORY_ID;
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
-const MANAGER_USER_ID = "1124685735384072213";
+const MANAGER_USER_ID = "1124685735384072213"; // Manager ID
 
+// CLIENT
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -26,14 +28,16 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-const tickets = new Map();
-const weeklyClaims = new Map();        // userId -> number
-const twoWeekClaims = new Map();       // userId -> [lastWeek, thisWeek]
+// DATA
+const tickets = new Map();         // userId -> ticket
+const weeklyClaims = new Map();    // staffId -> number
+const twoWeekClaims = new Map();   // staffId -> [lastWeek, thisWeek]
 
 // -------------------- HELPERS --------------------
 function getFirstImage(msg) {
   const a = msg.attachments.first();
-  return a && a.contentType?.startsWith("image/") ? a.url : null;
+  if (!a) return null;
+  return /\.(png|jpg|jpeg|gif)$/i.test(a.url) ? a.url : null;
 }
 
 async function closeTicket(ticket, reason) {
@@ -62,15 +66,43 @@ client.once(Events.ClientReady, () => {
   client.user.setStatus("idle");
 });
 
-// -------------------- DM HANDLER (CRITICAL FIX) --------------------
-client.on(Events.MessageCreate, async msg => {
+// -------------------- DM HANDLER --------------------
+client.on(Events.MessageCreate, async (msg) => {
   if (msg.author.bot) return;
 
-  // USER DM → STAFF CHANNEL
+  // Handle user DMs
   if (!msg.guild) {
-    const ticket = tickets.get(msg.author.id);
-    if (!ticket) return;
+    let ticket = tickets.get(msg.author.id);
+    const guild = client.guilds.cache.get(MAIN_GUILD_ID);
+    if (!guild) return;
 
+    // Auto-create ticket if it doesn't exist
+    if (!ticket) {
+      const channel = await guild.channels.create({
+        name: `ticket-${msg.author.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
+        type: ChannelType.GuildText,
+        parent: MODMAIL_CATEGORY_ID,
+        permissionOverwrites: [
+          { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
+          { id: STAFF_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
+          { id: msg.author.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
+        ]
+      });
+
+      ticket = { userId: msg.author.id, channelId: channel.id, lastActivity: Date.now(), claimed: false, claimedBy: null };
+      tickets.set(msg.author.id, ticket);
+
+      await channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("🎫 Ticket Opened")
+            .setDescription(`Opened by <@${msg.author.id}>`)
+            .setColor(0x00AE86)
+        ]
+      });
+    }
+
+    // Forward DM to ticket channel
     const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
     if (!channel) return;
 
@@ -85,10 +117,12 @@ client.on(Events.MessageCreate, async msg => {
     if (img) embed.setImage(img);
 
     ticket.lastActivity = Date.now();
-    return channel.send({ embeds: [embed] });
+    await channel.send({ embeds: [embed] });
+
+    return;
   }
 
-  // GUILD MESSAGE BELOW
+  // -------------------- GUILD MESSAGE HANDLER --------------------
   const ticket = [...tickets.values()].find(t => t.channelId === msg.channel.id);
   if (!ticket) return;
 
@@ -97,13 +131,13 @@ client.on(Events.MessageCreate, async msg => {
 
   const content = msg.content.toLowerCase();
 
+  // !claim
   if (content === "!claim") {
     if (ticket.claimed) return msg.reply("❌ Already claimed.");
     ticket.claimed = true;
     ticket.claimedBy = msg.author.id;
 
     weeklyClaims.set(msg.author.id, (weeklyClaims.get(msg.author.id) || 0) + 1);
-
     const twoWeeks = twoWeekClaims.get(msg.author.id) || [0, 0];
     twoWeeks[1]++;
     twoWeekClaims.set(msg.author.id, twoWeeks);
@@ -113,28 +147,28 @@ client.on(Events.MessageCreate, async msg => {
 
   if (!ticket.claimed) return msg.reply("❌ Claim the ticket first.");
 
+  // !close
   if (content === "!close") {
-    await closeTicket(ticket, "Closed by staff.");
+    await closeTicket(ticket, `Closed by <@${msg.author.id}>`);
     return;
   }
 
-  if (!content.startsWith("!")) {
-    const user = await client.users.fetch(ticket.userId).catch(() => null);
-    if (!user) return;
+  // Forward staff message to user
+  const user = await client.users.fetch(ticket.userId).catch(() => null);
+  if (!user) return;
 
-    const embed = new EmbedBuilder()
-      .setTitle("📩 Message from Support Team")
-      .setDescription(msg.content || "*No text*")
-      .setAuthor({ name: msg.author.tag, iconURL: msg.author.displayAvatarURL() })
-      .setColor(0xFFA500)
-      .setTimestamp();
+  const embed = new EmbedBuilder()
+    .setTitle("📩 Message from Support Team")
+    .setDescription(msg.content || "*No text*")
+    .setAuthor({ name: msg.author.tag, iconURL: msg.author.displayAvatarURL() })
+    .setColor(0xFFA500)
+    .setTimestamp();
 
-    const img = getFirstImage(msg);
-    if (img) embed.setImage(img);
+  const img = getFirstImage(msg);
+  if (img) embed.setImage(img);
 
-    ticket.lastActivity = Date.now();
-    await user.send({ embeds: [embed] }).catch(() => {});
-  }
+  ticket.lastActivity = Date.now();
+  await user.send({ embeds: [embed] }).catch(() => {});
 });
 
 // -------------------- AUTO CLOSE --------------------
@@ -146,22 +180,6 @@ setInterval(() => {
     }
   }
 }, 60 * 60 * 1000);
-
-// -------------------- WEEKLY QUOTA RESET --------------------
-setInterval(async () => {
-  for (const [userId, count] of weeklyClaims.entries()) {
-    if (count < 3) {
-      const user = await client.users.fetch(userId).catch(() => null);
-      if (user) await sendQuotaApproval(user, "this week");
-    }
-  }
-
-  for (const [userId, data] of twoWeekClaims.entries()) {
-    twoWeekClaims.set(userId, [data[1], 0]);
-  }
-
-  weeklyClaims.clear();
-}, 7 * 24 * 60 * 60 * 1000);
 
 // -------------------- LOGIN --------------------
 client.login(BOT_TOKEN);
