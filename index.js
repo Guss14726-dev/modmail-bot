@@ -1,216 +1,281 @@
-const {
+import 'dotenv/config';
+import {
   Client,
   GatewayIntentBits,
   Partials,
-  Events,
-  ChannelType,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  PermissionFlagsBits,
   EmbedBuilder,
-  PermissionsBitField
-} = require("discord.js");
+  TextChannel,
+  ChannelType,
+  GuildMember
+} from "discord.js";
 
-// CONFIG
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const MODMAIL_CATEGORY_ID = process.env.MODMAIL_CATEGORY_ID;
-const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID;
-const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
-const CHAIRMAN_ROLE_NAME = "Group Chairman";
-const MANAGER_USER_ID = "1124685735384072213"; // your ID for DM approval
+/* ================= CONFIG ================= */
+const LOG_CHANNEL_ID = "1463227300312256636";
+const MODMAIL_CATEGORY_ID = "1463204751574437939";
+const WELCOME_CHANNEL_NAME = "welcome";
+const SUSPICIOUS_AGE_DAYS = 7;
 
-// CLIENT
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
-  ],
-  partials: [Partials.Message, Partials.Channel, Partials.User]
-});
+/* ================= SAFETY HANDLERS ================= */
+process.on("unhandledRejection", err => console.error("Unhandled promise rejection:", err));
+process.on("uncaughtException", err => console.error("Uncaught exception:", err));
 
-// DATA
-const tickets = new Map();          // userId => ticket
-const ticketsByChannel = new Map(); // channelId => ticket
-const blacklisted = new Set();
+/* ================= SLASH COMMANDS ================= */
+const commands = [
+  new SlashCommandBuilder()
+    .setName("say")
+    .setDescription("Send a message")
+    .addStringOption(o => o.setName("message").setRequired(true))
+    .addChannelOption(o => o.setName("channel").setRequired(true))
+    .addBooleanOption(o => o.setName("embed")),
 
-// HELPERS
-function isStaff(member) {
-  return (
-    member.roles.cache.has(STAFF_ROLE_ID) ||
-    member.roles.cache.some(r => r.name === CHAIRMAN_ROLE_NAME)
-  );
-}
+  new SlashCommandBuilder()
+    .setName("flight")
+    .setDescription("Flight announcement")
+    .addStringOption(o => o.setName("flight_number").setRequired(true))
+    .addStringOption(o => o.setName("destination").setRequired(true))
+    .addUserOption(o => o.setName("host").setRequired(true))
+    .addChannelOption(o => o.setName("channel").setRequired(true)),
 
-function getFirstImage(msg) {
-  const a = msg.attachments?.first();
-  if (!a) return null;
-  if (a.contentType?.startsWith("image/") || /\.(png|jpe?g|gif)$/i.test(a.url))
-    return a.url;
-  return null;
-}
+  new SlashCommandBuilder()
+    .setName("fake_ban")
+    .setDescription("Fake ban")
+    .addUserOption(o => o.setName("user").setRequired(true)),
 
-async function closeTicket(ticket, reason) {
-  const user = await client.users.fetch(ticket.userId).catch(() => null);
-  const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
+  new SlashCommandBuilder()
+    .setName("test_welcome")
+    .setDescription("Test welcome"),
 
-  if (user) {
-    await user.send({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle("❌ Ticket Closed")
-          .setDescription(reason)
-          .setColor(0xff0000)
-      ]
-    }).catch(() => {});
+  new SlashCommandBuilder()
+    .setName("suspicious_test")
+    .setDescription("Suspicious accounts")
+    .addSubcommand(s => s.setName("user").addUserOption(o => o.setName("target").setRequired(true)))
+    .addSubcommand(s => s.setName("all")),
+
+  new SlashCommandBuilder()
+    .setName("dm")
+    .setDescription("DM a user via the bot")
+    .addUserOption(o => o.setName("user").setRequired(true))
+    .addStringOption(o => o.setName("message").setRequired(true))
+].map(c => c.toJSON());
+
+/* ================= BOT ================= */
+export async function setupDiscordBot() {
+  const client = new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMembers,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+      GatewayIntentBits.DirectMessages
+    ],
+    partials: [Partials.Message, Partials.Channel]
+  });
+
+  const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+  const tickets = new Map<string, string>();
+
+  /* ================= LOG UTIL ================= */
+  async function sendLog(embed: EmbedBuilder, pingHere = false) {
+    try {
+      const guild = await client.guilds.fetch(process.env.GUILD_ID!);
+      const channel = await guild.channels.fetch(LOG_CHANNEL_ID) as TextChannel;
+      if (!channel || !channel.isTextBased()) return;
+      await channel.send({ content: pingHere ? "@here" : undefined, embeds: [embed] });
+    } catch (err) { console.error("sendLog error:", err); }
   }
 
-  if (channel) await channel.delete().catch(() => {});
+  /* ================= JOIN + SUSPICIOUS ================= */
+  async function handleJoin(member: GuildMember) {
+    try {
+      const age = (Date.now() - member.user.createdTimestamp) / 86400000;
+      const suspicious = age < SUSPICIOUS_AGE_DAYS;
 
-  tickets.delete(ticket.userId);
-  ticketsByChannel.delete(ticket.channelId);
-}
+      const embed = new EmbedBuilder()
+        .setTitle("Member Joined")
+        .setColor(suspicious ? 0xff9900 : 0x2ecc71)
+        .setThumbnail(member.user.displayAvatarURL())
+        .addFields(
+          { name: "User", value: `${member.user.tag} (<@${member.id}>)` },
+          { name: "Account Age", value: `${age.toFixed(1)} days` }
+        )
+        .setTimestamp();
 
-async function forwardUserMessage(ticket, msg) {
-  const channel = await client.channels.fetch(ticket.channelId).catch(() => null);
-  if (!channel) return;
+      await sendLog(embed, suspicious);
 
-  const embed = new EmbedBuilder()
-    .setTitle("📩 Message from User")
-    .setAuthor({
-      name: msg.author.tag,
-      iconURL: msg.author.displayAvatarURL()
-    })
-    .setDescription(msg.content || "*No text*")
-    .setColor(0x00ae86)
-    .setTimestamp();
+      const welcome = member.guild.channels.cache.find(
+        c => c.type === ChannelType.GuildText && c.name === WELCOME_CHANNEL_NAME
+      ) as TextChannel | undefined;
 
-  const img = getFirstImage(msg);
-  if (img) embed.setImage(img);
+      if (welcome) await welcome.send(`Welcome <@${member.id}> 👋`);
+    } catch (err) { console.error("handleJoin error:", err); }
+  }
 
-  await channel.send({ embeds: [embed] });
-}
+  client.on("guildMemberAdd", handleJoin);
 
-async function forwardStaffMessage(ticket, msg) {
-  const user = await client.users.fetch(ticket.userId).catch(() => null);
-  if (!user) return;
-
-  const embed = new EmbedBuilder()
-    .setTitle("📩 Message from Staff")
-    .setAuthor({
-      name: msg.author.tag,
-      iconURL: msg.author.displayAvatarURL()
-    })
-    .setDescription(msg.content || "*No text*")
-    .setColor(0x5865f2)
-    .setTimestamp();
-
-  const img = getFirstImage(msg);
-  if (img) embed.setImage(img);
-
-  // IMPORTANT: ONLY SEND MESSAGE — DO NOT CLOSE
-  await user.send({ embeds: [embed] }).catch(() => {});
-}
-
-// READY
-client.once(Events.ClientReady, () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
-  client.user.setActivity("For Tickets", { type: "Listening" });
-});
-
-// TICKET CREATION
-client.on(Events.InteractionCreate, async i => {
-  if (!i.isStringSelectMenu() || i.customId !== "ticket-category") return;
-  if (blacklisted.has(i.user.id))
-    return i.reply({ content: "❌ You cannot open tickets.", ephemeral: true });
-
-  if (tickets.has(i.user.id))
-    return i.reply({ content: "❌ You already have an open ticket.", ephemeral: true });
-
-  const guild = await client.guilds.fetch(MAIN_GUILD_ID);
-
-  const channel = await guild.channels.create({
-    name: `ticket-${i.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
-    type: ChannelType.GuildText,
-    parent: MODMAIL_CATEGORY_ID,
-    permissionOverwrites: [
-      {
-        id: guild.roles.everyone,
-        deny: [PermissionsBitField.Flags.ViewChannel]
-      },
-      {
-        id: STAFF_ROLE_ID,
-        allow: [
-          PermissionsBitField.Flags.ViewChannel,
-          PermissionsBitField.Flags.SendMessages
-        ]
+  /* ================= MESSAGE DELETE ================= */
+  client.on("messageDelete", async msg => {
+    try {
+      if (msg.partial) {
+        try { msg = await msg.fetch(); } catch (err) { return; }
       }
-    ]
+      if (!msg.author) return;
+
+      const embed = new EmbedBuilder()
+        .setTitle("Message Deleted")
+        .setColor(0xff9900)
+        .setDescription(
+          `**Author:** ${msg.author.tag}\n**Channel:** ${msg.channel}\n**Content:** ${msg.content || "[No text]"}`
+        )
+        .setTimestamp();
+
+      if (msg.attachments.size)
+        embed.addFields({ name: "Attachments", value: msg.attachments.map(a => a.url).join("\n") });
+
+      await sendLog(embed);
+    } catch (err) { console.error("messageDelete error:", err); }
   });
 
-  const ticket = {
-    userId: i.user.id,
-    channelId: channel.id,
-    lastActivity: Date.now()
-  };
-
-  tickets.set(i.user.id, ticket);
-  ticketsByChannel.set(channel.id, ticket);
-
-  await channel.send({
-    embeds: [
-      new EmbedBuilder()
-        .setTitle("🎫 Ticket Opened")
-        .setDescription(`Opened by <@${i.user.id}>`)
-        .setColor(0x00ae86)
-    ]
+  /* ================= ROLE LOGS ================= */
+  client.on("guildMemberUpdate", async (oldM, newM) => {
+    try {
+      for (const r of newM.roles.cache.filter(r => !oldM.roles.cache.has(r.id))) {
+        await sendLog(new EmbedBuilder()
+          .setTitle("Role Added")
+          .setDescription(`${r.name} → ${newM.user.tag}`)
+          .setColor(0x2ecc71));
+      }
+      for (const r of oldM.roles.cache.filter(r => !newM.roles.cache.has(r.id))) {
+        await sendLog(new EmbedBuilder()
+          .setTitle("Role Removed")
+          .setDescription(`${r.name} ← ${newM.user.tag}`)
+          .setColor(0xe74c3c));
+      }
+    } catch (err) { console.error("guildMemberUpdate error:", err); }
   });
 
-  await i.reply({
-    content: `✅ Ticket created: <#${channel.id}>`,
-    ephemeral: true
+  /* ================= MODMAIL + STAFF DM ================= */
+  client.on("messageCreate", async msg => {
+    if (msg.author.bot) return;
+
+    try {
+      // USER DM → STAFF
+      if (msg.channel.type === ChannelType.DM) {
+        let channelId = tickets.get(msg.author.id);
+
+        const guild = await client.guilds.fetch(process.env.GUILD_ID!);
+        const category = await guild.channels.fetch(MODMAIL_CATEGORY_ID);
+        if (!category || category.type !== ChannelType.GuildCategory) return;
+
+        if (!channelId) {
+          const channel = await guild.channels.create({
+            name: `modmail-${msg.author.username}`,
+            type: ChannelType.GuildText,
+            parent: category.id
+          });
+          tickets.set(msg.author.id, channel.id);
+          await channel.send({ content: "@here", embeds: [new EmbedBuilder().setTitle("New ModMail").setDescription(`User: ${msg.author.tag}`)] });
+          await msg.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription("✅ Successfully connected to our Support team")] });
+          channelId = channel.id;
+        }
+
+        const staffChannel = await client.channels.fetch(channelId) as TextChannel;
+        if (!staffChannel) return;
+
+        const sent = await staffChannel.send({ content: `**User:** ${msg.author.tag}`, files: [...msg.attachments.values()] });
+        await sent.react("✅");
+        return;
+      }
+
+      // STAFF → USER
+      if (msg.channel.parentId === MODMAIL_CATEGORY_ID) {
+        const userId = [...tickets.entries()].find(e => e[1] === msg.channel.id)?.[0];
+        if (!userId) return;
+
+        if (msg.content.startsWith("!close")) {
+          tickets.delete(userId);
+          await msg.channel.delete();
+          return;
+        }
+
+        if (msg.content.startsWith("!r") || msg.content.startsWith("!R")) {
+          const reply = msg.content.slice(2).trim();
+          try {
+            const user = await client.users.fetch(userId);
+            const sent = await user.send({ content: reply, files: [...msg.attachments.values()] });
+            await sent.react("✅");
+            await msg.react("✅");
+            await sendLog(new EmbedBuilder().setTitle("ModMail Reply Sent")
+              .setDescription(`**To:** ${user.tag}\n**By:** ${msg.author.tag}\n**Message:** ${reply}`)
+              .setColor(0x3498db));
+          } catch {
+            await msg.reply("❌ Could not deliver message (DMs closed).");
+          }
+        }
+      }
+    } catch (err) { console.error("modmail messageCreate error:", err); }
   });
-});
 
-// MESSAGE HANDLER
-client.on(Events.MessageCreate, async msg => {
-  if (msg.author.bot) return;
+  /* ================= SLASH COMMAND HANDLER ================= */
+  client.on("interactionCreate", async i => {
+    if (!i.isChatInputCommand()) return;
 
-  // USER DMs → STAFF
-  if (!msg.guild) {
-    const ticket = tickets.get(msg.author.id);
-    if (!ticket) return;
-    ticket.lastActivity = Date.now();
-    return forwardUserMessage(ticket, msg);
-  }
+    try {
+      // DM command
+      if (i.commandName === "dm") {
+        if (!i.memberPermissions?.has(PermissionFlagsBits.ManageMessages))
+          return i.reply({ content: "No permission.", ephemeral: true });
 
-  // STAFF → USER
-  const ticket = ticketsByChannel.get(msg.channel.id);
-  if (!ticket) return;
+        const user = i.options.getUser("user", true);
+        const message = i.options.getString("message", true);
 
-  const member = await msg.guild.members.fetch(msg.author.id);
-  if (!isStaff(member)) return;
+        try {
+          const dm = await user.send({ embeds: [new EmbedBuilder().setTitle("📩 Message from Staff").setDescription(message)] });
+          await dm.react("✅");
+          await sendLog(new EmbedBuilder().setTitle("DM Sent")
+            .setDescription(`**To:** ${user.tag}\n**By:** ${i.user.tag}\n**Message:** ${message}`)
+            .setColor(0x3498db));
+          await i.reply({ content: "DM sent.", ephemeral: true });
+        } catch {
+          await i.reply({ content: "❌ Could not DM user (DMs may be closed).", ephemeral: true });
+        }
+      }
 
-  const content = msg.content.toLowerCase();
+      // Suspicious test
+      if (i.commandName === "suspicious_test") {
+        await i.deferReply({ ephemeral: true });
+        const sub = i.options.getSubcommand(false);
+        if (!sub) return i.editReply("Invalid subcommand.");
 
-  if (content === "!close") {
-    return closeTicket(ticket, "Closed by staff.");
-  }
+        if (sub === "user") {
+          const user = i.options.getUser("target", true);
+          const member = await i.guild!.members.fetch(user.id);
+          await handleJoin(member);
+          return i.editReply("User checked.");
+        }
 
-  if (!content.startsWith("!")) {
-    ticket.lastActivity = Date.now();
-    return forwardStaffMessage(ticket, msg);
-  }
-});
+        if (sub === "all") {
+          const members = await i.guild!.members.fetch();
+          for (const m of members.values()) {
+            const age = (Date.now() - m.user.createdTimestamp) / 86400000;
+            if (age < SUSPICIOUS_AGE_DAYS) await handleJoin(m);
+          }
+          return i.editReply("All members checked.");
+        }
+      }
+    } catch (err) { console.error("interactionCreate error:", err); }
+  });
 
-// AUTO CLOSE (24H ONLY)
-setInterval(() => {
-  const now = Date.now();
-  for (const ticket of tickets.values()) {
-    if (now - ticket.lastActivity >= 24 * 60 * 60 * 1000) {
-      closeTicket(ticket, "Closed due to inactivity.");
-    }
-  }
-}, 60 * 60 * 1000);
+  /* ================= READY ================= */
+  client.once("ready", async () => {
+    try {
+      await rest.put(Routes.applicationCommands(process.env.DISCORD_CLIENT_ID!), { body: commands });
+      console.log(`Logged in as ${client.user?.tag}`);
+    } catch (err) { console.error("Command registration error:", err); }
+  });
 
-// LOGIN
-client.login(BOT_TOKEN);
+  await client.login(process.env.DISCORD_TOKEN);
+}
